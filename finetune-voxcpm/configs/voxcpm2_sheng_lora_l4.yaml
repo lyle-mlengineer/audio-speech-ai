@@ -1,0 +1,61 @@
+# VoxCPM2 LoRA on Sheng (Swahili + English) - reference template, L4 / A10 24 GB.
+#
+# `sheng-voxcpm train` does NOT read this file: it renders the config it actually
+# passes to scripts/train_voxcpm_finetune.py from
+# src/sheng_voxcpm/config.py::PROFILES (so paths always point at the live
+# artifacts root and the steps/lora-r CLI flags win).
+# The rendered file is written to <artifacts>/configs/<run>.yaml.
+#
+# The template exists to document the exact shape that is rendered, and
+# tests/test_config.py asserts the two stay in sync.
+#
+# ${ARTIFACTS} = artifacts root (Google Drive on Colab).
+
+pretrained_path: ${ARTIFACTS}/pretrained_models/VoxCPM2
+train_manifest: ${ARTIFACTS}/manifests/train.jsonl
+val_manifest: ${ARTIFACTS}/manifests/val.jsonl
+
+# AudioVAE encoder input rate - asserted against audio_vae.sample_rate upstream.
+# 48000 is the decoder output and only affects TensorBoard audio logging.
+sample_rate: 16000
+out_sample_rate: 48000
+
+# Effective batch = batch_size x grad_accum_steps = 16.
+batch_size: 2
+grad_accum_steps: 8
+max_batch_tokens: 8192
+num_workers: 8
+preprocessing_num_workers: 8
+
+# num_iters is the loop bound; max_steps only sizes the cosine schedule.
+# 38 train clips x 30 s at effective batch 16 => ~2.4 steps/epoch, so 600 steps
+# is ~250 epochs: plenty for a 21-minute single-speaker LoRA.
+num_iters: 600
+max_steps: 600
+log_interval: 10
+valid_interval: 100
+save_interval: 100
+
+learning_rate: 0.0001
+weight_decay: 0.01
+warmup_steps: 50
+max_grad_norm: 1.0
+
+save_path: ${ARTIFACTS}/checkpoints/lora_r32
+tensorboard: ${ARTIFACTS}/logs/lora_r32/tensorboard
+
+lambdas:
+  loss/diff: 1.0
+  loss/stop: 1.0
+
+lora:
+  enable_lm: true
+  enable_dit: true
+  enable_proj: false
+  r: 32
+  alpha: 32
+  dropout: 0.0
+
+# false => checkpoints record the local pretrained_path; `sheng-voxcpm export`
+# rewrites base_model to openbmb/VoxCPM2 so the adapter is portable.
+distribute: false

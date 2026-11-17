@@ -1,0 +1,51 @@
+# VoxCPM2 LoRA on Sheng (Swahili + English) - reduced template for T4 / 16 GB.
+#
+# T4 is Turing (compute capability 7.5): no native bfloat16, which the trainer
+# autocasts to, so it emulates bf16 and runs several times slower. The official
+# LoRA reference is ~20 GB VRAM; this profile shrinks the micro-batch and token
+# budget so training fits in 16 GB at all. Use it only with
+# `sheng-voxcpm train --profile t4 --allow-small-gpu`.
+#
+# ${ARTIFACTS} = artifacts root (Google Drive on Colab).
+
+pretrained_path: ${ARTIFACTS}/pretrained_models/VoxCPM2
+train_manifest: ${ARTIFACTS}/manifests/train.jsonl
+val_manifest: ${ARTIFACTS}/manifests/val.jsonl
+
+sample_rate: 16000
+out_sample_rate: 48000
+
+# One 30 s clip per micro-step; 16 accumulation steps keeps the effective batch.
+batch_size: 1
+grad_accum_steps: 16
+max_batch_tokens: 4096
+num_workers: 4
+preprocessing_num_workers: 4
+
+num_iters: 600
+max_steps: 600
+log_interval: 10
+valid_interval: 100
+save_interval: 100
+
+learning_rate: 0.0001
+weight_decay: 0.01
+warmup_steps: 50
+max_grad_norm: 1.0
+
+save_path: ${ARTIFACTS}/checkpoints/lora_r32
+tensorboard: ${ARTIFACTS}/logs/lora_r32/tensorboard
+
+lambdas:
+  loss/diff: 1.0
+  loss/stop: 1.0
+
+lora:
+  enable_lm: true
+  enable_dit: true
+  enable_proj: false
+  r: 32
+  alpha: 32
+  dropout: 0.0
+
+distribute: false

@@ -1,0 +1,18 @@
+# --- project code only (light) ---------------------------------------
+# The heavy stack (torch, voxcpm, datasets, soundfile) is installed by
+# scripts/colab_setup.sh because Colab already ships a CUDA-matched torch
+# and we must not reinstall it.
+
+pyyaml>=6.0
+tqdm>=4.66
+
+# --- required on Colab (usually already installed) -------------------
+# torch>=2.5.0          (Colab preinstalled, CUDA build)
+# torchaudio            (resampling)
+# numpy, scipy, soundfile, pandas, pyarrow
+# datasets>=2.19        (HF dataset + audio decoding)
+# huggingface_hub>=0.23
+# argbind, tensorboardX, transformers, safetensors   (pulled in by voxcpm)
+
+# --- installed by `pip install -e <VoxCPM repo>` in setup ------------
+# voxcpm @ git+https://github.com/OpenBMB/VoxCPM.git

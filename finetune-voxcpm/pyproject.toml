@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sheng-voxcpm"
+version = "0.1.0"
+description = "VoxCPM2 LoRA fine-tuning pipeline for Sheng (Swahili + English) on Colab"
+requires-python = ">=3.10"
+dependencies = [
+    "pyyaml>=6.0",
+    "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+sheng-voxcpm = "sheng_voxcpm.cli:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+packages = ["sheng_voxcpm"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

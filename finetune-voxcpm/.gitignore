@@ -1,0 +1,27 @@
+# heavy / expensive artifacts (also what survives on Google Drive)
+artifacts/
+data/
+checkpoints/
+pretrained_models/
+logs/
+evals/
+exports/
+*.wav
+*.parquet
+*.safetensors
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+
+# notebooks
+.ipynb_checkpoints/
+
+# colab
+drive/

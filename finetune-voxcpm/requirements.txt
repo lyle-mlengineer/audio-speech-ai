@@ -1,0 +1,19 @@
+# --- project-side dependencies (light) ---------------------------------
+# The heavy ML stack (torch, torchaudio, voxcpm, datasets, soundfile) is
+# installed by `scripts/colab_bootstrap.sh` / `sheng-voxcpm env` because
+# Colab already ships a CUDA-matched torch that must not be replaced.
+
+pyyaml>=6.0
+tqdm>=4.66
+
+# --- installed by `sheng-voxcpm env` (curated, if missing) -------------
+# torch, torchaudio      (Colab preinstalled, keep the CUDA build)
+# datasets>=3,<4         (HF dataset + audio decoding)
+# huggingface-hub>=0.23  (model snapshot + dataset download)
+# soundfile, librosa, scipy, numpy
+# transformers>=4.36.2, tokenizers, safetensors, einops, pydantic
+# argbind, tensorboardX, matplotlib, pyyaml, inflect, addict
+# simplejson, sortedcontainers
+
+# --- installed from the cloned OpenBMB/VoxCPM repo ---------------------
+# voxcpm @ file://<artifacts>/repo/VoxCPM   (pip install -e --no-deps)
