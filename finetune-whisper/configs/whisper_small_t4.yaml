@@ -1,0 +1,54 @@
+# Small model variant: fast iteration and a sanity check before committing
+# T4 hours to whisper-medium.
+#
+#   python scripts/train.py --config configs/whisper_small_t4.yaml
+#
+# whisper-small is ~244M params, so a batch of 8 fits comfortably and each
+# epoch takes a fraction of medium's time. Use this to validate the pipeline,
+# then move to whisper_medium_t4.yaml.
+
+model:
+  name: openai/whisper-small
+  language: swahili
+  task: transcribe
+  return_timestamps: false
+  use_8bit_adam: true
+
+data:
+  dataset_name: lyle-mlengineer/kenyan-celebs
+  train_split: train
+  eval_fraction: 0.15
+  seed: 42
+  lowercase: true
+  strip_punctuation: true
+  collapse_repeats: true
+  max_repeat_run: 2
+  speed_perturb: true
+  speed_perturb_prob: 0.3
+  spec_augment: true
+
+train:
+  output_dir: outputs/whisper-small-sheng
+  max_epochs: 12
+  per_device_train_batch_size: 8
+  per_device_eval_batch_size: 8
+  gradient_accumulation_steps: 1
+  learning_rate: 1.0e-5
+  gradient_checkpointing: true
+  fp16: true
+  bf16: false
+  logging_steps: 5
+  eval_steps: 20
+  save_steps: 20
+  save_total_limit: 2
+  early_stopping_patience: 3
+  generation_max_length: 225
+  generation_num_beams: 1
+
+mlflow:
+  tracking_uri: sqlite:///mlflow.db
+  experiment_name: whisper-sheng
+
+hub:
+  push_to_hub: false
+  repo_id: lyle-mlengineer/whisper-small-sheng

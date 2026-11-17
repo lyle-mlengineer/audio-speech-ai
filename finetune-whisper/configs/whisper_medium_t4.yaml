@@ -1,0 +1,87 @@
+# Fine-tune openai/whisper-medium for Sheng on a Colab T4 (15GB VRAM).
+#
+# VRAM budget for whisper-medium: ~769M params.
+#   weights fp16            ~1.5 GB
+#   gradients fp16          ~1.5 GB
+#   AdamW8bit states        ~1.5 GB
+#   activations (bs=4)      ~2-4 GB with gradient checkpointing
+#   mel features + overhead ~1 GB
+# Landing around 8-10 GB, which leaves headroom on a T4.
+
+model:
+  name: openai/whisper-medium
+  language: swahili        # Sheng has no Whisper token; Swahili is the base
+  task: transcribe
+  return_timestamps: false
+  use_8bit_adam: true
+
+data:
+  dataset_name: lyle-mlengineer/kenyan-celebs
+  dataset_config: null
+  train_split: train
+  eval_split: null         # None -> carve eval out of train
+  audio_column: audio
+  text_column: text
+  eval_fraction: 0.15
+  seed: 42
+  max_input_seconds: 30.0
+  sampling_rate: 16000
+
+  lowercase: true
+  strip_punctuation: true
+  collapse_repeats: true   # "nomaaa" -> "nomaa" on both ref and hyp
+  max_repeat_run: 2
+
+  speed_perturb: true
+  speed_perturb_prob: 0.3
+  speed_factors: [0.9, 0.95, 1.05, 1.1]
+
+  spec_augment: true
+  freq_mask_param: 24
+  time_mask_param: 40
+  num_freq_masks: 2
+  num_time_masks: 2
+
+train:
+  output_dir: outputs/whisper-medium-sheng
+  max_epochs: 12
+  max_steps: -1
+  per_device_train_batch_size: 4
+  per_device_eval_batch_size: 4
+  gradient_accumulation_steps: 2
+  learning_rate: 1.0e-5
+  weight_decay: 0.01
+  warmup_ratio: 0.1
+  max_grad_norm: 1.0
+  gradient_checkpointing: true
+  fp16: true               # T4 has no bf16
+  bf16: false
+  logging_steps: 5
+  eval_steps: 20
+  save_steps: 20
+  save_total_limit: 2
+  metric_for_best_model: wer
+  greater_is_better: false
+  early_stopping_patience: 3
+  dataloader_num_workers: 2
+  predict_with_generate: true
+  generation_max_length: 225
+  generation_num_beams: 1
+  resume_from_checkpoint: null
+
+mlflow:
+  # Relative paths are resolved to absolute at runtime; on Colab point this
+  # at Drive so runs survive a disconnect.
+  tracking_uri: sqlite:///mlflow.db
+  experiment_name: whisper-sheng
+  run_name: null
+  log_model_artifacts: true
+  log_checkpoint_artifact: false
+  tags: {}
+
+hub:
+  push_to_hub: true
+  repo_id: lyle-mlengineer/whisper-medium-sheng
+  private: false
+  commit_message: "Fine-tune Whisper for Sheng ASR"
+  upload_eval_report: true
