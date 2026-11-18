@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kenya-voices"
+version = "0.1.0"
+description = "Caption-conditioned LoRA fine-tune of VoxCPM2 so users can design Kenyan-sounding voices from a text description"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "datasets>=3,<4",
+  "huggingface-hub>=0.23",
+  "soundfile",
+  "numpy",
+  "scipy",
+  "pyyaml",
+]
+
+[project.optional-dependencies]
+app = ["gradio>=4"]
+dev = ["pytest>=8"]
+
+[project.scripts]
+kenya-voices = "kenya_voices.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

@@ -1,0 +1,45 @@
+# Chatterbox T3 on Sheng (Swahili + English) - reference template, L4 / A10G 24 GB - the Colab default.
+#
+# `sheng-chatterbox train` does NOT read this file: it renders the settings it
+# actually passes to `python -m sheng_chatterbox.train_t3` from
+# src/sheng_chatterbox/config.py::PROFILES, so paths always point at the live
+# artifacts root and CLI flags (--steps, --learning-rate) win.
+# The rendered copy is written to <artifacts>/configs/<run>.yaml.
+#
+# The template exists to document the exact shape that is rendered; tests/test_config.py
+# asserts the two stay in sync.
+#
+# ${ARTIFACTS} = artifacts root (Google Drive on Colab).
+#
+run: sheng_t3
+profile: l4
+# effective batch = batch_size * grad_accum (fixed at 8)
+batch_size: 4
+grad_accum: 2
+steps: 600
+learning_rate: 0.00005
+weight_decay: 0.01
+warmup_steps: 50
+max_grad_norm: 1.0
+log_interval: 10
+valid_interval: 100
+save_interval: 100
+keep_last: 3
+# S3 speech tokens are 25/s; 1024 covers ~40 s incl. prompt
+max_text_len: 512
+max_speech_len: 1024
+cond_seconds: 6.0
+emotion_adv: 0.5
+model_variant: mtl
+language_id: sw
+dtype: bf16
+seed: 1337
+tensorboard: true
+
+# resolved paths (artifacts root: ${ARTIFACTS})
+pretrained_dir: ${ARTIFACTS}/pretrained/chatterbox
+base_t3: t3_mtl23ls_v2.safetensors
+train_manifest: ${ARTIFACTS}/manifests/train.jsonl
+val_manifest: ""
+save_dir: ${ARTIFACTS}/checkpoints/sheng_t3
+cache_dir: ${ARTIFACTS}/cache/features_sheng_t3

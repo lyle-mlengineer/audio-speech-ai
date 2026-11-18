@@ -1,0 +1,8 @@
+# `pip install -e .` is enough for the CLI (stdlib only at import time).
+# The ML stack is installed by `sheng-chatterbox env`, which keeps Colab's
+# CUDA build of torch (see src/sheng_chatterbox/env.py for why):
+#   pip install --no-deps chatterbox-tts==0.1.7
+#   pip install librosa s3tokenizer diffusers conformer safetensors \
+#               resemble-perth pyloudnorm omegaconf tokenizers transformers \
+#               datasets soundfile tensorboard tqdm
+chatterbox-tts==0.1.7

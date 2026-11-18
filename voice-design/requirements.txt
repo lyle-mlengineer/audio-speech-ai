@@ -1,0 +1,11 @@
+# Runtime deps for the Colab pipeline (torch/torchaudio come from Colab itself).
+# `kenya-voices env` installs the curated subset of the VoxCPM repo's deps; this
+# file is for a plain `pip install -r requirements.txt`.
+datasets>=3,<4
+huggingface-hub>=0.23
+soundfile
+numpy
+scipy
+pyyaml
+# only needed for `app/voice_design_app.py`
+gradio>=4
