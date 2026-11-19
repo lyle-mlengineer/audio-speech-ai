@@ -1,0 +1,10 @@
+# the CLI itself (needed on Colab before anything else)
+-e .
+numpy>=1.24
+soundfile>=0.12
+pyarrow>=14
+huggingface_hub>=0.23
+
+# stage 3-6: the model. Pins transformers==4.57.3, librosa, torchaudio, onnxruntime.
+# `pip install -U qwen-tts` also upgrades/downgrades torch on Colab - let it.
+qwen-tts==0.1.1
