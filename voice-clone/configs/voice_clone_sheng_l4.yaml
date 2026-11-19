@@ -1,0 +1,40 @@
+# Voice cloning on Sheng (Swahili + English) - reference template, Colab L4 / A10G 24 GB.
+#
+# `sheng-voiceclone train` does NOT read this file: it renders the profile it
+# actually uses from src/sheng_voiceclone/config.py::PROFILES against the live
+# artifacts root, so paths always point at the mounted Drive. The rendered copy
+# lands in <artifacts>/configs/<run>.yaml.
+#
+# This template documents the exact shape that is rendered; tests/test_config.py
+# asserts the two stay in sync.
+#
+# ${ARTIFACTS} = artifacts root (Google Drive on Colab).
+
+run: sheng_clone
+profile: l4
+# effective batch = batch_size * grad_accum (8 on every profile)
+batch_size: 4
+grad_accum: 2
+dtype: bfloat16
+steps: 600
+lr: 0.00005
+weight_decay: 0.01
+warmup_steps: 50
+max_grad_norm: 1.0
+log_interval: 10
+save_interval: 100
+keep_last: 3
+# LoRA instead of a full T3 fine-tune. 21 min of audio is firmly in LoRA
+# territory (the sibling chatterbox kit recommends LoRA for <= 10 h).
+lora: false
+lora_r: 16
+lora_alpha: 32
+# 16 kHz is what the voice encoder / S3 tokenizer consume; output stays 24 kHz
+sample_rate: 16000
+
+train_manifest: ${ARTIFACTS}/manifests/train.jsonl
+val_manifest: ${ARTIFACTS}/manifests/val.jsonl
+ref_audio: ${ARTIFACTS}/data/ref_audio.wav
+pretrained_dir: ${ARTIFACTS}/pretrained/chatterbox
+save_dir: ${ARTIFACTS}/checkpoints/sheng_clone
+eval_dir: ${ARTIFACTS}/evals/sheng_clone

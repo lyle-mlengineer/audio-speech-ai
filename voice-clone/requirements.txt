@@ -1,0 +1,12 @@
+# Data / scoring only (works on a bare machine, no GPU)
+numpy>=1.24
+soundfile>=0.12
+pyarrow>=14
+huggingface_hub>=0.23
+
+# Colab side (synthesis + judges + training)
+# chatterbox-tts        # synthesis, zero-shot clone
+# torch                 # pulled in by chatterbox-tts
+# transformers          # Whisper CER/WER judge
+# speechbrain           # ECAPA speaker-similarity judge
+# -e ../finetune-chatterbox   # T3 fine-tune

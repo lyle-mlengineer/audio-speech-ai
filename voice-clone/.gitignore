@@ -1,0 +1,11 @@
+# artifacts live on Drive (Colab) or ./artifacts locally - never in git
+artifacts/
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+.venv/
