@@ -1,0 +1,20 @@
+# artifacts are regenerated; the Drive copy is the real one on Colab
+artifacts/
+build/
+dist/
+exports/
+*.zip
+
+# python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+.venv/
+
+# audio / checkpoints you drop in by hand
+*.wav
+*.pt
+*.safetensors
+*.parquet
+!tests/data/*.wav

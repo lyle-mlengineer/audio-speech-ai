@@ -1,0 +1,11 @@
+# the CLI + data stage (needed on Colab before the model)
+-e .
+numpy>=1.24
+soundfile>=0.12
+pyarrow>=14
+huggingface_hub>=0.23
+
+# stages 4-6: F5-TTS. Pulls torch/torchaudio/vocos/datasets/ema-pytorch/
+# accelerate/transformers/gradio. Pinned because this recipe depends on
+# `Trainer`, `CustomDataset` and the v1 Base DiT layout; bump deliberately.
+f5-tts==1.1.22
