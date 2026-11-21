@@ -30,7 +30,10 @@ class Profile:
     batch_size: int
     grad_accum: int
     dtype: str
-    steps: int = 600
+    # 200 steps x batch 8 = 1600 clips ~= 47 passes over the ~17 min train split.
+    # 600 (the old default) was ~140 epochs: well into the overfit zone for a
+    # voice fine-tune; the scoring harness penalises the word loss it causes.
+    steps: int = 200
     lr: float = 5e-5
     weight_decay: float = 0.01
     warmup_steps: int = 50
@@ -51,7 +54,7 @@ class Profile:
 
 PROFILES: dict[str, Profile] = {
     "l4": Profile("l4", batch_size=4, grad_accum=2, dtype="bfloat16", min_vram_gb=20.0),
-    "a100": Profile("a100", batch_size=8, grad_accum=1, dtype="bfloat16", min_vram_gb=38.0, steps=800),
+    "a100": Profile("a100", batch_size=8, grad_accum=1, dtype="bfloat16", min_vram_gb=38.0),
     "t4": Profile(
         "t4", batch_size=2, grad_accum=4, dtype="float16", min_vram_gb=14.0, allow_small_gpu=True
     ),

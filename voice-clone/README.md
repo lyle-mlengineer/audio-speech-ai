@@ -60,7 +60,7 @@ import os; os.environ['SHENG_VOICECLONE_ARTIFACTS'] = '/content/drive/MyDrive/vo
 
 # 5. the number to beat, then the tune, then the verdict
 !sheng-voiceclone baseline --prompts sheng,swahili
-!sheng-voiceclone train --profile l4 --steps 600 --lr 5e-5 --lora --max-hours 8
+!sheng-voiceclone train --profile l4 --steps 200 --lr 5e-5 --lora --max-hours 8
 !sheng-voiceclone eval --prompts sheng,swahili && sheng-voiceclone compare
 ```
 
@@ -128,13 +128,20 @@ Effective batch is **8** everywhere, so `--steps` and `--lr` mean the same thing
 on every GPU:
 
 ```bash
-!sheng-voiceclone train --profile l4 --steps 600 --lr 5e-5 --lora --max-hours 8
+!sheng-voiceclone train --profile l4 --steps 200 --lr 5e-5 --lora --max-hours 8
 ```
 
 Default is a full T3 fine-tune at `5e-5`; `--lora` switches to adapters, which is
 the right call for 21 minutes of audio (the community kit's own guidance: LoRA for
 anything under ~10 h). Either way the LR is low on purpose - the reported failure
 mode for this family at `2e-5`+ is noise or endless generation.
+
+**200 steps, not 600.** 34 train clips x 30 s is ~17 min, so 200 steps at
+effective batch 8 is ~47 epochs; 600 was ~140, which for a voice clone shows up as
+the speaker drifting toward the training clips while the words degrade.
+`--max-hours` is only a wall-clock watchdog (`--steps` sets the real budget), and
+checkpoints land every 100 steps, so `eval --ckpt .../step_100` is the fallback if
+200 already overfits.
 
 ---
 

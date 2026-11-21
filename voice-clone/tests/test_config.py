@@ -52,7 +52,7 @@ def test_rendered_yaml_parses_back(art):
     p = cfg.write_yaml(cfg.profile("t4"), art, run="r1")
     parsed = cfg.parse_yaml(p.read_text(encoding="utf-8"))
     assert parsed["profile"] == "t4"
-    assert parsed["steps"] == 600
+    assert parsed["steps"] == 200
     assert parsed["lr"] == pytest.approx(5e-5)
     assert parsed["lora"] is False
     assert parsed["train_manifest"].endswith("train.jsonl")

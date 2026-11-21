@@ -16,7 +16,7 @@ profile: l4
 batch_size: 4
 grad_accum: 2
 dtype: bfloat16
-steps: 600
+steps: 200
 lr: 0.00005
 weight_decay: 0.01
 warmup_steps: 50
@@ -27,6 +27,9 @@ keep_last: 3
 # LoRA instead of a full T3 fine-tune. 21 min of audio is firmly in LoRA
 # territory (the sibling chatterbox kit recommends LoRA for <= 10 h).
 lora: false
+# 200 steps x effective batch 8 = ~47 epochs over ~17 min of train audio (34
+# clips x 30 s). 600 steps was ~140 epochs: overfit territory for a voice
+# fine-tune, and the scorer reports it as MIXED (words lost) or wrong-voice.
 lora_r: 16
 lora_alpha: 32
 # 16 kHz is what the voice encoder / S3 tokenizer consume; output stays 24 kHz
