@@ -32,7 +32,7 @@ import time
 from pathlib import Path
 
 from .compat import patch_torchaudio, seed_everything
-from .config import updates_for
+from .config import DEFAULT_PROFILE, PROFILES, updates_for
 from .paths import Paths, resolve_artifacts, resolve_scratch
 from .progress import Progress
 
@@ -111,6 +111,11 @@ def install_deadline(trainer, hours: float) -> None:
 
 
 # ---------------------------------------------------------------------- parser
+# Defaults mirror the default runtime profile (Colab T4) so that running this
+# module directly is safe on a 16 GB card.
+_DEFAULT = PROFILES[DEFAULT_PROFILE]
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="python -m sauti_sheng.train", description=__doc__)
     p.add_argument("--artifacts", default=None)
@@ -121,16 +126,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--checkpoint-dir", default=None, help="default: <artifacts>/checkpoints/<run>")
     p.add_argument("--pretrain", default=None, help="default: <artifacts>/pretrained/sauti-tts/sauti_ema.pt")
 
-    p.add_argument("--epochs", type=int, default=150)
-    p.add_argument("--batch-size", type=int, default=2, help="samples per forward pass")
-    p.add_argument("--grad-accum", type=int, default=2)
-    p.add_argument("--lr", type=float, default=1e-5)
-    p.add_argument("--warmup", type=int, default=100, help="warmup optimizer updates")
-    p.add_argument("--save-per-updates", type=int, default=250)
-    p.add_argument("--last-per-updates", type=int, default=100)
-    p.add_argument("--keep-last", type=int, default=3)
+    p.add_argument("--epochs", type=int, default=_DEFAULT.epochs)
+    p.add_argument("--batch-size", type=int, default=_DEFAULT.batch_size, help="samples per forward pass")
+    p.add_argument("--grad-accum", type=int, default=_DEFAULT.grad_accum)
+    p.add_argument("--lr", type=float, default=_DEFAULT.learning_rate)
+    p.add_argument("--warmup", type=int, default=_DEFAULT.warmup_updates, help="warmup optimizer updates")
+    p.add_argument("--save-per-updates", type=int, default=_DEFAULT.save_per_updates)
+    p.add_argument("--last-per-updates", type=int, default=_DEFAULT.last_per_updates)
+    p.add_argument("--keep-last", type=int, default=_DEFAULT.keep_last)
     p.add_argument("--max-grad-norm", type=float, default=1.0)
-    p.add_argument("--mixed-precision", default="bf16", choices=["bf16", "fp16", "no"])
+    p.add_argument("--mixed-precision", default=_DEFAULT.mixed_precision, choices=["bf16", "fp16", "no"])
     p.add_argument("--num-workers", type=int, default=2)
     p.add_argument("--seed", type=int, default=1337)
     p.add_argument("--limit", type=int, default=None, help="only the first N clips (debugging)")
@@ -185,13 +190,19 @@ def run(args) -> int:
     import torch
 
     if not torch.cuda.is_available():
-        raise SystemExit("no CUDA device: F5 fine-tuning is GPU-only (Colab L4/A100/T4)")
+        raise SystemExit("no CUDA device: F5 fine-tuning is GPU-only (Colab T4/L4/A100)")
     device_name = torch.cuda.get_device_name(0)
 
     patch_torchaudio()
     seed_everything(args.seed)
+    # TF32 is Ampere+; a no-op on the T4 but free speed on L4/A100.
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
+    if args.mixed_precision == "bf16" and not torch.cuda.is_bf16_supported():
+        print(
+            "[train] this GPU has no bf16 support (T4/Turing); the t4 default uses fp16 - "
+            "add --mixed-precision fp16 to avoid an accelerate failure"
+        )
 
     if args.fresh:
         removed = clear_checkpoints(checkpoint_dir)

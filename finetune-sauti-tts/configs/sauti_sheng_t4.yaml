@@ -1,7 +1,16 @@
-# Sauti TTS on Sheng - reference template for profile t4 (16 GB, tight).
+# Sauti TTS on Sheng - reference template for profile t4 (Colab free tier).
 #
-# Requires `--allow-small-gpu`. Rendered configs live in
-# <artifacts>/configs/<run>.yaml; this file is only a human-readable template.
+# This is the DEFAULT runtime. `sauti-sheng setup` suggests it on a T4 and
+# `sauti-sheng train` uses it with no extra flags (no --allow-small-gpu needed).
+# 16 GB, Turing sm75: one 30 s sample per forward pass and fp16, because T4 has
+# no bf16.
+#
+# `sauti-sheng train` does NOT read this file: it renders the settings from
+# src/sauti_sheng/config.py::PROFILES and passes them to
+# `python -m sauti_sheng.train`. The rendered copy lands in
+# <artifacts>/configs/<run>.yaml; tests/test_config.py keeps the keys in sync.
+#
+# ${ARTIFACTS} = artifacts root (Google Drive on Colab).
 #
 run: sheng_abel
 profile: t4
@@ -18,7 +27,6 @@ max_grad_norm: 1.0
 mixed_precision: fp16
 max_samples: 1
 min_vram_gb: 14.0
-allow_small_gpu: true
 
 # resolved paths (artifacts root: ${ARTIFACTS})
 pretrained: ${ARTIFACTS}/pretrained/sauti-tts/sauti_ema.pt

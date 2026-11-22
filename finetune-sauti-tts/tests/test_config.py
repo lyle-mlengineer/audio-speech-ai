@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from sauti_sheng.config import (
+    DEFAULT_PROFILE,
     PROFILES,
     auto_profile,
     render_config,
@@ -20,11 +21,17 @@ def test_every_profile_has_effective_batch_four():
         assert profile.effective_batch == 4
 
 
+def test_default_profile_is_t4():
+    assert DEFAULT_PROFILE == "t4"
+    assert PROFILES[DEFAULT_PROFILE].mixed_precision == "fp16"  # T4 has no bf16
+    assert PROFILES[DEFAULT_PROFILE].effective_batch == 4
+
+
 def test_auto_profile_maps_gpus():
     assert auto_profile("NVIDIA A100-SXM4-40GB", 40) == "a100"
     assert auto_profile("NVIDIA L4", 24) == "l4"
-    assert auto_profile("Tesla T4", 16) == "t4"
-    assert auto_profile("Tesla T4", 15) == "t4"
+    assert auto_profile("Tesla T4", 16) == DEFAULT_PROFILE
+    assert auto_profile("Tesla T4", 15) == DEFAULT_PROFILE
     assert auto_profile("Quadro M2000", 4) is None
 
 
@@ -38,9 +45,11 @@ def test_unknown_profile_is_rejected():
         resolve_profile("h100", "A100", 40)
 
 
-def test_t4_needs_opt_in():
-    with pytest.raises(RuntimeError, match="allow-small-gpu"):
-        resolve_profile("t4", "Tesla T4", 16)
+def test_t4_runs_without_opt_in():
+    # The T4 profile is the default runtime, so it must not need a flag.
+    assert resolve_profile(None, "Tesla T4", 16).name == "t4"
+    assert resolve_profile("t4", "Tesla T4", 16).name == "t4"
+    # The legacy flag stays accepted (deprecated, no effect).
     assert resolve_profile("t4", "Tesla T4", 16, allow_small_gpu=True).name == "t4"
 
 
@@ -65,10 +74,11 @@ def test_update_maths():
 
 def test_render_config_contains_paths_and_flags(tmp_path):
     paths = Paths(tmp_path / "artifacts").ensure()
-    text = render_config(PROFILES["l4"], "sheng_abel", paths, epochs=7)
-    assert "profile: l4" in text
+    text = render_config(PROFILES[DEFAULT_PROFILE], "sheng_abel", paths, epochs=7)
+    assert f"profile: {DEFAULT_PROFILE}" in text
     assert "epochs: 7" in text
     assert "effective_batch: 4" in text
+    assert "mixed_precision: fp16" in text
     assert str(paths.sauti_ema_ckpt) in text
     assert str(paths.checkpoint_dir("sheng_abel")) in text
 

@@ -31,8 +31,9 @@ md(
 on [`lyle-mlengineer/kenyan-celebs`](https://huggingface.co/datasets/lyle-mlengineer/kenyan-celebs)
 — 42 clips, 21 min, one speaker.
 
-**Before you start:** `Runtime → Change runtime type → L4 GPU` (A100 if you have Pro; T4 only with
-`--allow-small-gpu` and expect it to be slow).
+**Before you start:** `Runtime → Change runtime type → **T4 GPU**` — the free-tier default and this
+recipe's default profile. `t4` is detected automatically and needs no extra flags (16 GB, fp16).
+An `L4` or `A100` runtime is ~3x faster if you have Pro: pass `--profile l4` / `--profile a100`.
 
 Run the cells top to bottom. Stages are idempotent, so after a disconnect you re-run from the top and
 it picks up where it stopped.
@@ -51,7 +52,7 @@ code(
     """
 import torch
 print("torch", torch.__version__, "| cuda", torch.cuda.is_available())
-assert torch.cuda.is_available(), "No GPU: Runtime -> Change runtime type -> L4 GPU"
+assert torch.cuda.is_available(), "No GPU: Runtime -> Change runtime type -> T4 GPU"
 props = torch.cuda.get_device_properties(0)
 print(f"{props.name} | {props.total_memory / 1024**3:.1f} GB | capability {torch.cuda.get_device_capability(0)}")
 """
@@ -116,7 +117,7 @@ md(
 ## 5. Stage 1 — environment check
 
 Reports torch / F5 / vocos / datasets / ffmpeg / GPU / VRAM / free disk and picks a training profile
-automatically (`l4`, `a100`, or `t4`).
+automatically (`t4` on the free T4 runtime; `l4` / `a100` on paid GPUs).
 """
 )
 
@@ -205,11 +206,15 @@ md(
 Effective batch is 4 samples of 30 s on every profile, so epochs mean roughly the same amount of
 training on each GPU:
 
-| profile | GPU | batch × accum | epochs | updates |
-|---|---|---|---|---|
-| `l4` | L4 24 GB | 2 × 2 | 150 | 1650 |
-| `a100` | A100 40/80 GB | 4 × 1 | 150 | 1650 |
-| `t4` (needs `--allow-small-gpu`) | T4 16 GB | 1 × 4 | 200 | 2200 |
+| profile | GPU | batch × accum | epochs | updates | precision |
+|---|---|---|---|---|---|
+| `t4` (default) | T4 16 GB | 1 × 4 | 200 | 2200 | fp16 |
+| `l4` | L4 24 GB | 2 × 2 | 150 | 1650 | bf16 |
+| `a100` | A100 40/80 GB | 4 × 1 | 150 | 1650 | bf16 |
+
+The T4 profile is picked automatically on a T4 runtime; no `--allow-small-gpu` flag is needed. It uses
+fp16 because Turing has no bf16, and 200 epochs to make up for the smaller per-step batch. Expect the
+full run to span several `--max-hours 8` sessions — training resumes from `model_last.pt` each time.
 
 **Verify the wiring first** with a smoke run (1 epoch × 4 clips, ~2 min). It overwrites
 `model_last.pt` with junk, so delete the checkpoint dir afterwards or just skip straight to the real
@@ -378,8 +383,8 @@ md(
 
 | symptom | fix |
 |---|---|
-| `no profile for … 0 GB VRAM` | No GPU. Change the runtime type. |
-| `the t4 profile is tight (16 GB)` | Add `--allow-small-gpu` or switch to L4/A100. |
+| `no profile for … 0 GB VRAM` | No GPU. **Runtime → Change runtime type → T4 GPU**. |
+| OOM at the first step | Make sure no stale `--batch-size` override is in the command; on 16 GB use the default `t4` profile (batch 1 × accum 4). |
 | `torchcodec` / `libav*` / ffmpeg error | Should not happen — `patch_torchaudio()` is applied by every stage. Check `ffmpeg -version`; set `SAUTI_KEEP_TORCHAUDIO=1` to see the real traceback. |
 | Runtime died mid-training | Re-run the train cell. It resumes from `model_last.pt`. |
 | Loss flat, output unchanged from base | Wrong init: `checkpoints/sheng_abel/pretrained_sauti.pt` must have no `update` key. Re-run `!sauti-sheng model`. |
@@ -394,7 +399,7 @@ notebook = {
     "cells": CELLS,
     "metadata": {
         "accelerator": "GPU",
-        "colab": {"provenance": [], "toc_visible": True, "gpuType": "L4"},
+        "colab": {"provenance": [], "toc_visible": True, "gpuType": "T4"},
         "kernelspec": {"display_name": "Python 3", "name": "python3"},
         "language_info": {"name": "python"},
     },

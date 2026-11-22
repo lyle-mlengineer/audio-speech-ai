@@ -6,8 +6,9 @@ checkpoint trained on Swahili — on **Sheng** (Nairobi Swahili + English code-s
 Training data is [`lyle-mlengineer/kenyan-celebs`](https://huggingface.co/datasets/lyle-mlengineer/kenyan-celebs):
 42 clips, 21 minutes, one speaker (`abel`). That is a **voice** fine-tune, not a language course.
 
-Everything runs on a single Colab GPU. The CLI tracks stage progress on Google Drive, so a
-runtime disconnect costs you the current step, not the run.
+Everything runs on a single Colab GPU. The **default runtime is a free-tier T4** (16 GB) — the `t4`
+training profile is auto-detected there and needs no extra flags. The CLI tracks stage progress on
+Google Drive, so a runtime disconnect costs you the current step, not the run.
 
 ```bash
 pip install -e .
@@ -43,7 +44,8 @@ between them.
 
 1. Open [Google Colab](https://colab.research.google.com/) → **File → Upload notebook** → pick the
    file above.
-2. **Runtime → Change runtime type → L4 GPU** (A100 if you have Pro, T4 only with `--allow-small-gpu`).
+2. **Runtime → Change runtime type → T4 GPU** (the free-tier default; an L4/A100 is ~3x faster if you
+   have Pro — pass `--profile l4` / `--profile a100`).
 3. **Runtime → Run all**, or run the cells one at a time and listen to `eval` output before
    exporting.
 
@@ -77,7 +79,8 @@ Two more decisions worth knowing:
 
 ## Requirements
 
-- Python ≥ 3.10, CUDA GPU
+- Python ≥ 3.10, CUDA GPU. The reference runtime is Colab's free **T4 16 GB** (profile `t4`, fp16);
+  L4 24 GB and A100 40/80 GB are auto-detected and faster.
 - `f5-tts==1.1.22` (pulls torch, torchaudio, vocos, datasets, ema-pytorch, accelerate, transformers)
 - Disk: the raw 5.4 GB release goes to **scratch** (local Colab disk, deleted after the EMA is
   extracted), so ~7 GB of local disk is enough. Training writes ~5 GB checkpoints to the **artifacts**
@@ -169,10 +172,10 @@ sauti-sheng status
 
 ```
 run: sheng_abel   (updated 2025-01-02 11:04:33)
- [x] 1. setup    Environment (torch + F5-TTS) ready  --  NVIDIA L4 / l4
+ [x] 1. setup    Environment (torch + F5-TTS) ready  --  Tesla T4 / t4
  [x] 2. data     ... -- 42 clips / 21.0 min @ 24000 Hz -> 38 train + 4 val
  [x] 3. model    ... -- EMA 1.35 GB (raw 5.39 GB deleted)
- [~] 4. train    F5-TTS fine-tune on Sheng  --  150 epochs, batch 2x2 @ l4
+ [~] 4. train    F5-TTS fine-tune on Sheng  --  200 epochs, batch 1x4 @ t4
  [ ] 5. eval     Checkpoint synthesised + sanity checked
  [ ] 6. export   Self-contained model dir + samples packaged
 ```
@@ -207,8 +210,8 @@ Global flags:
 
 | flag | default | meaning |
 |---|---|---|
-| `--profile {t4,l4,a100}` | auto-detect | see [profiles](#training-profiles) |
-| `--allow-small-gpu` | off | required to accept the T4 profile |
+| `--profile {t4,l4,a100}` | auto-detect (`t4` on a T4) | see [profiles](#training-profiles) |
+| `--allow-small-gpu` | off | deprecated, no effect — the t4 profile is no longer gated |
 | `--epochs`, `--batch-size`, `--grad-accum`, `--lr` | profile | override any profile value |
 | `--save-interval` / `--last-interval` | profile | numbered checkpoint / `model_last.pt` cadence, in updates |
 | `--keep-last` | profile | numbered checkpoints kept |
@@ -236,17 +239,20 @@ Global flags:
 ## Training profiles
 
 Effective batch is **4 samples everywhere**, so `epochs` means roughly the same amount of training
-on each GPU. One sample is a 30 s clip = 2812 mel frames; F5's VRAM formula allows ~9728 frames on
-24 GB, so two samples per forward pass fit comfortably.
+on each GPU. One sample is a 30 s clip = 2812 mel frames; F5's VRAM formula
+(``38400 * (VRAM_GB - 5) / 75`` frames) allows ~5632 frames on a 16 GB T4 — enough for exactly one
+30 s sample per forward pass — and ~9728 frames on 24 GB, so two samples fit comfortably there.
 
 | profile | GPU | batch × accum | epochs | updates | precision |
 |---|---|---|---|---|---|
-| `l4` (default) | L4 24 GB | 2 × 2 | 150 | 1650 | bf16 |
+| `t4` (default) | T4 16 GB | 1 × 4 | 200 | 2200 | fp16 |
+| `l4` | L4 24 GB | 2 × 2 | 150 | 1650 | bf16 |
 | `a100` | A100 40/80 GB | 4 × 1 | 150 | 1650 | bf16 |
-| `t4` | T4 16 GB | 1 × 4 | 200 | 2200 | fp16 |
 
-The profile is auto-detected from the GPU name and VRAM; `--profile` overrides. T4 refuses to run
-without `--allow-small-gpu` because it is genuinely tight. `configs/*.yaml` are human-readable
+The profile is auto-detected from the GPU name and VRAM (`auto_profile`), and `DEFAULT_PROFILE = "t4"`
+(`src/sauti_sheng/config.py`) is the fallback and the runtime assumed by the notebook, the `configs/`
+templates and `python -m sauti_sheng.train`'s own defaults. On a T4 you get batch 1 × accum 4 and
+**fp16**, because Turing (sm75) has no bf16. `--profile` overrides. `configs/*.yaml` are human-readable
 templates only — nothing reads them back. The settings actually used are rendered to
 `<artifacts>/configs/<run>.yaml` on every `train`, so a run is reproducible after a disconnect.
 
@@ -350,8 +356,8 @@ torchaudio compat shim.
 
 | symptom | cause / fix |
 |---|---|
-| `no profile for … with 0 GB VRAM` | No GPU. **Runtime → Change runtime type → L4 GPU**. |
-| `the t4 profile is tight (16 GB)` | Add `--allow-small-gpu`, or switch to L4/A100. |
+| `no profile for … with 0 GB VRAM` | No GPU. **Runtime → Change runtime type → T4 GPU**. |
+| CUDA OOM at the first training step | Something overrode the batch: on 16 GB keep the `t4` default (batch 1 × accum 4) and do not pass `--batch-size`. |
 | `torchcodec` / `libavcodec` / `ffmpeg` error | Should not happen: `patch_torchaudio()` is applied by every stage. If it does, check `ffmpeg -version`, or set `SAUTI_KEEP_TORCHAUDIO=1` to see the real traceback. |
 | Colab runtime died mid-training | Just re-run: `sauti-sheng all` resumes from `model_last.pt` (`--last-interval` controls how much is lost). |
 | Training loss flat, output unchanged after 150 epochs | Classic symptom of resuming Sauti's checkpoint instead of initialising from it. Check that `checkpoints/<run>/pretrained_sauti.pt` has no `update` key and `model_report.md` says EMA-only. |

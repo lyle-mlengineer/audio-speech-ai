@@ -7,6 +7,11 @@ VRAM formula is ``38400 * (VRAM_GB - 5) / 75`` frames, i.e. ~9728 frames on a
 
 Effective batch is 4 samples everywhere, so ``epochs`` means roughly the same
 amount of training on every GPU.
+
+The default runtime is Colab's free **T4** GPU (``DEFAULT_PROFILE``). The t4
+profile is sized for its 16 GB and Turing (sm75) compute: one 30 s sample per
+forward pass, 4-step gradient accumulation and fp16, because T4 has no bf16. It
+is slow, not fragile - no opt-in flag is needed anymore.
 """
 
 from __future__ import annotations
@@ -28,7 +33,6 @@ class Profile:
     mixed_precision: str     # "bf16" | "fp16"
     max_samples: int         # cap inside a batch (F5 Trainer argument)
     min_vram_gb: float
-    allow_small_gpu: bool
     note: str
 
     @property
@@ -41,7 +45,25 @@ class Profile:
         return d
 
 
+#: Profile used when nothing better is detected / requested: the free Colab T4.
+DEFAULT_PROFILE = "t4"
+
 PROFILES: dict[str, Profile] = {
+    "t4": Profile(
+        name="t4",
+        batch_size=1,
+        grad_accum=4,
+        epochs=200,
+        learning_rate=1e-5,
+        warmup_updates=100,
+        save_per_updates=200,
+        last_per_updates=50,
+        keep_last=3,
+        mixed_precision="fp16",
+        max_samples=1,
+        min_vram_gb=14.0,
+        note="Colab T4 16 GB. The default runtime; slow, so verify wiring with --smoke first.",
+    ),
     "l4": Profile(
         name="l4",
         batch_size=2,
@@ -55,8 +77,7 @@ PROFILES: dict[str, Profile] = {
         mixed_precision="bf16",
         max_samples=2,
         min_vram_gb=20.0,
-        allow_small_gpu=False,
-        note="Colab L4 24 GB. The default; full fine-tune, no LoRA.",
+        note="Colab L4 24 GB. ~3x faster than T4; full fine-tune, no LoRA.",
     ),
     "a100": Profile(
         name="a100",
@@ -71,30 +92,19 @@ PROFILES: dict[str, Profile] = {
         mixed_precision="bf16",
         max_samples=4,
         min_vram_gb=35.0,
-        allow_small_gpu=False,
-        note="Colab A100 40/80 GB. Same effective batch, fewer steps per update.",
-    ),
-    "t4": Profile(
-        name="t4",
-        batch_size=1,
-        grad_accum=4,
-        epochs=200,
-        learning_rate=1e-5,
-        warmup_updates=100,
-        save_per_updates=200,
-        last_per_updates=50,
-        keep_last=3,
-        mixed_precision="fp16",
-        max_samples=1,
-        min_vram_gb=14.0,
-        allow_small_gpu=True,
-        note="Colab T4 16 GB. Slow and tight; verify with --smoke first.",
+        note="Colab A100 40/80 GB. Same effective batch, fewest steps per update.",
     ),
 }
 
+assert DEFAULT_PROFILE in PROFILES, "DEFAULT_PROFILE must name a known profile"
+
 
 def auto_profile(gpu_name: str | None, vram_gb: float | None) -> str | None:
-    """Best profile for the detected GPU, or None when nothing fits."""
+    """Best profile for the detected GPU, or None when nothing fits.
+
+    A T4 resolves to the default (t4) profile, so the free Colab runtime trains
+    out of the box.
+    """
     name = (gpu_name or "").upper()
     vram = float(vram_gb or 0.0)
     if "A100" in name or "H100" in name or "L40" in name:
@@ -102,13 +112,13 @@ def auto_profile(gpu_name: str | None, vram_gb: float | None) -> str | None:
     if "L4" in name:
         return "l4"
     if "T4" in name or "V100" in name:
-        return "t4" if vram >= PROFILES["t4"].min_vram_gb else None
+        return DEFAULT_PROFILE if vram >= PROFILES[DEFAULT_PROFILE].min_vram_gb else None
     if vram >= PROFILES["a100"].min_vram_gb:
         return "a100"
     if vram >= PROFILES["l4"].min_vram_gb:
         return "l4"
-    if vram >= PROFILES["t4"].min_vram_gb:
-        return "t4"
+    if vram >= PROFILES[DEFAULT_PROFILE].min_vram_gb:
+        return DEFAULT_PROFILE
     return None
 
 
@@ -116,9 +126,10 @@ def resolve_profile(
     requested: str | None,
     gpu_name: str | None,
     vram_gb: float | None,
-    allow_small_gpu: bool = False,
+    allow_small_gpu: bool = True,  # deprecated: the t4 profile is no longer gated
 ) -> Profile:
     """Explicit profile wins; otherwise auto-detect and enforce the VRAM floor."""
+    del allow_small_gpu  # kept so old invocations/scripts still work
     if requested:
         if requested not in PROFILES:
             raise ValueError(f"unknown profile {requested!r}; known: {sorted(PROFILES)}")
@@ -128,15 +139,11 @@ def resolve_profile(
         if detected is None:
             raise RuntimeError(
                 f"no profile for {gpu_name or 'unknown GPU'} with {vram_gb or 0:.0f} GB VRAM; "
-                "F5-TTS fine-tuning wants >= 16 GB. Pass --profile t4 --allow-small-gpu to try anyway."
+                f"F5-TTS fine-tuning wants >= {PROFILES[DEFAULT_PROFILE].min_vram_gb:.0f} GB "
+                f"(the {DEFAULT_PROFILE} profile). Pass --profile {{t4,l4,a100}} to try another shape."
             )
         profile = PROFILES[detected]
 
-    if profile.allow_small_gpu and not allow_small_gpu and profile.name == "t4":
-        raise RuntimeError(
-            "the t4 profile is tight (16 GB). Re-run with --allow-small-gpu if you accept the risk, "
-            "or use an L4/A100 runtime."
-        )
     if vram_gb is not None and vram_gb < profile.min_vram_gb:
         raise RuntimeError(
             f"profile {profile.name!r} wants >= {profile.min_vram_gb:.0f} GB VRAM, "
@@ -173,6 +180,7 @@ def render_config(profile: Profile, run: str, paths, **overrides) -> str:
     disconnect.
     """
     values = profile.as_dict()
+    values.pop("note", None)
     values["profile"] = values.pop("name", profile.name)
     values.update({k: v for k, v in overrides.items() if v is not None})
     values["run"] = run

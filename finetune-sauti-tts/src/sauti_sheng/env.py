@@ -12,7 +12,7 @@ import platform
 import shutil
 from pathlib import Path
 
-from .config import PROFILES, auto_profile
+from .config import DEFAULT_PROFILE, PROFILES, auto_profile
 
 F5_PIN = "f5-tts==1.1.22"
 
@@ -99,14 +99,19 @@ def check(info: dict | None = None) -> dict:
         problems.append("pyarrow is missing -> !pip install -q pyarrow")
     if not info.get("cuda"):
         problems.append("no CUDA device: setup/data/model/export work, training does not")
-    if info.get("gpu_gb") and info["gpu_gb"] < PROFILES["t4"].min_vram_gb:
-        problems.append(f"only {info['gpu_gb']} GB VRAM - F5 fine-tuning wants >= 16 GB")
+    if info.get("gpu_gb") and info["gpu_gb"] < PROFILES[DEFAULT_PROFILE].min_vram_gb:
+        problems.append(
+            f"only {info['gpu_gb']} GB VRAM - F5 fine-tuning wants >= "
+            f"{PROFILES[DEFAULT_PROFILE].min_vram_gb:.0f} GB (the {DEFAULT_PROFILE} profile)"
+        )
     for key, label in (("artifacts_free_gb", "artifacts"), ("scratch_free_gb", "scratch")):
         free = info.get(key)
         if free is not None and free < 8:
             problems.append(f"{label} has {free} GB free; a run needs ~10 GB (checkpoints + raw model)")
     info["problems"] = problems
     info["suggested_profile"] = auto_profile(info.get("gpu"), info.get("gpu_gb"))
+    if info["suggested_profile"] is None and info.get("cuda"):
+        info["suggested_profile"] = DEFAULT_PROFILE
     return info
 
 
@@ -120,7 +125,10 @@ def run(artifacts: Path | None = None, scratch: Path | None = None) -> dict:
     print(f"  vocos        {info['vocos']}   soundfile {info['soundfile']}   pyarrow {info['pyarrow']}")
     print(f"  ffmpeg       {info['ffmpeg']}")
     print(f"  disk free    artifacts {info['artifacts_free_gb']} GB   scratch {info['scratch_free_gb']} GB")
-    print(f"  profile      {info['suggested_profile']}")
+    print(f"  profile      {info['suggested_profile']}" + (
+        "   (no bf16 on this GPU - the t4 profile trains in fp16)"
+        if info.get("cuda") and not info.get("bf16") else ""
+    ))
     if info["problems"]:
         print("\n  problems:")
         for problem in info["problems"]:

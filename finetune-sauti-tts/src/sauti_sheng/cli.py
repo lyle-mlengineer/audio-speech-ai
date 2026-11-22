@@ -18,7 +18,7 @@ import sys
 from pathlib import Path
 
 from . import data as data_stage
-from .config import PROFILES, resolve_profile, write_config
+from .config import DEFAULT_PROFILE, PROFILES, resolve_profile, write_config
 from .paths import DEFAULT_RUN, Paths, resolve_artifacts, resolve_scratch
 from .progress import Progress
 
@@ -70,8 +70,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _add_train_args(p: argparse.ArgumentParser) -> None:
-    p.add_argument("--profile", default=None, choices=sorted(PROFILES))
-    p.add_argument("--allow-small-gpu", action="store_true", help="allow the 16 GB t4 profile")
+    p.add_argument("--profile", default=None, choices=sorted(PROFILES),
+                   help=f"force a GPU profile (default: auto-detect; {DEFAULT_PROFILE} is the default runtime)")
+    p.add_argument("--allow-small-gpu", action="store_true",
+                   help="deprecated, no effect: the 16 GB t4 profile is the default")
     p.add_argument("--epochs", type=int, default=None)
     p.add_argument("--batch-size", type=int, default=None)
     p.add_argument("--grad-accum", type=int, default=None)

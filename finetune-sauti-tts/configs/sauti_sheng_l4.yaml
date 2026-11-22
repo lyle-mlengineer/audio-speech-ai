@@ -9,7 +9,7 @@
 # ${ARTIFACTS} = artifacts root (Google Drive on Colab).
 #
 run: sheng_abel
-profile: l4
+profile: l4  # not the default; use on an L4 runtime
 # effective batch = batch_size * grad_accum (fixed at 4 samples)
 batch_size: 2
 grad_accum: 2
@@ -23,7 +23,6 @@ max_grad_norm: 1.0
 mixed_precision: bf16
 max_samples: 2
 min_vram_gb: 20.0
-allow_small_gpu: false
 
 # resolved paths (artifacts root: ${ARTIFACTS})
 pretrained: ${ARTIFACTS}/pretrained/sauti-tts/sauti_ema.pt
