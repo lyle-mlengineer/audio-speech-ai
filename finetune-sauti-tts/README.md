@@ -361,7 +361,8 @@ torchaudio compat shim.
 | `torchcodec` / `libavcodec` / `ffmpeg` error | Should not happen: `patch_torchaudio()` is applied by every stage. If it does, check `ffmpeg -version`, or set `SAUTI_KEEP_TORCHAUDIO=1` to see the real traceback. |
 | Colab runtime died mid-training | Just re-run: `sauti-sheng all` resumes from `model_last.pt` (`--last-interval` controls how much is lost). |
 | Training loss flat, output unchanged after 150 epochs | Classic symptom of resuming Sauti's checkpoint instead of initialising from it. Check that `checkpoints/<run>/pretrained_sauti.pt` has no `update` key and `model_report.md` says EMA-only. |
-| Output is babble / wrong characters | Vocab mismatch. The text embedding must match `data/f5/vocab.txt` (2545 entries, copied from the Sauti repo). |
+| Output is babble / wrong characters | Vocab mismatch. `data/f5/vocab.txt` must be the 2545-entry Sauti vocab (F5 then builds a 2546-row text embedding). |
+| `checkpoint text embedding has N rows but …/vocab.txt has N-2` | Wrong vocab file. Sauti needs its own `vocab.txt`: 2545 entries, i.e. 2546 embedding rows. |
 | `missing pretrained checkpoint …` | Run `sauti-sheng model`. |
 | `FileNotFoundError: …/raw.arrow` | Run `sauti-sheng data`. |
 | Drive fills up | Lower `--keep-last`, and keep only `exports/` plus `model_last.pt`. |

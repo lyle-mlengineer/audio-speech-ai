@@ -70,7 +70,8 @@ def ensure_vocab(paths: Paths, force: bool = False) -> Path:
 
     This is *not* optional. F5's own prepare script copies the Emilia vocab; if
     that were used with a Sauti checkpoint, every token index would be wrong.
-    The checkpoint's text embedding and this file must have the same length.
+    The checkpoint's text embedding has one row more than this file has lines
+    (F5 pads the embedding with a filler row), so 2545 entries -> 2546 rows.
     """
     if force or not paths.sauti_vocab.is_file():
         from huggingface_hub import hf_hub_download

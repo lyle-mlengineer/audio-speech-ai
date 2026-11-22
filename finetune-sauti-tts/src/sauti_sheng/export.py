@@ -20,7 +20,7 @@ import json
 import shutil
 from pathlib import Path
 
-from .checkpoint import export_state, select_state_dict
+from .checkpoint import export_state, select_state_dict, text_embed_rows
 from .paths import Paths, checkpoint_update
 
 CARD = """\
@@ -127,6 +127,7 @@ def export(
         "sample_rate": 24000,
         "mel": {"n_fft": 1024, "hop_length": 256, "win_length": 1024, "n_mel_channels": 100},
         "vocab_size": vocab_size,
+        "text_embed_rows": text_embed_rows(vocab_size) if vocab_size else None,
     }
     (dest / "config.json").write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
     (dest / "README.md").write_text(CARD.format(run=run, use_ema=use_ema), encoding="utf-8")

@@ -20,7 +20,8 @@ That is not a fine-tune, and it is silent.
 
 So this stage extracts ``{"ema_model_state_dict": ...}`` into
 ``pretrained/sauti-tts/sauti_ema.pt`` (~1.35 GB, Drive-safe), verifies the text
-embedding matches Sauti's ``vocab.txt`` (2545 entries), writes a report, and
+embedding matches Sauti's ``vocab.txt`` (2545 entries -> 2546 embedding rows,
+because F5 pads the text embedding with one filler row), writes a report, and
 deletes the 5.4 GB raw file from scratch.
 
 The EMA is the right starting point for a *fine-tune* (it is the smoothed
@@ -40,6 +41,7 @@ from .checkpoint import (
     prepare_for_load,
     select_state_dict,
     strip_to_ema,
+    text_embed_rows,
 )
 from .compat import free_memory
 from .paths import MODEL_FILE, MODEL_REPO_ID, SAMPLE_RATE, Paths
@@ -137,7 +139,8 @@ def _write_report(paths: Paths, raw: Path, raw_bytes: int, info: dict, vocab_siz
         f"- training checkpoint: **{info['training_checkpoint']}**"
         + (f" (update {info['update']})" if info["update"] is not None else ""),
         f"- EMA tensors: {info['ema_tensors']} ({ema_gb:.2f} GB)",
-        f"- text embedding rows: **{info['text_vocab_size']}**, vocab file: **{vocab_size}**",
+        f"- text embedding rows: **{info['text_embed_rows']}** (= {vocab_size} chars + 1 filler row)",
+        f"- vocab file entries: **{vocab_size}**",
         "",
         "## What was kept",
         "",
@@ -161,10 +164,12 @@ def _write_report(paths: Paths, raw: Path, raw_bytes: int, info: dict, vocab_siz
         "## Vocab check",
         "",
         "Sauti's `vocab.txt` has one entry per line, index 0 = space (F5's"
-        " unknown-character fallback). The checkpoint's"
+        " unknown-character fallback). F5's `TextEmbedding` allocates"
+        " `nn.Embedding(text_num_embeds + 1, text_dim)` for its filler token, so"
         " `transformer.text_embed.text_embed.weight` has"
-        f" {info['text_vocab_size']} rows, so training must reuse **Sauti's** vocab"
-        " - F5's Emilia vocab would silently remap every character.",
+        f" **{vocab_size} + 1 = {info['text_embed_rows']} rows** - one more than the"
+        " vocab file has lines, and no character is remapped. Training must reuse"
+        " **Sauti's** vocab: F5's Emilia vocab would silently remap every character.",
         "",
     ]
     if deleted:
@@ -196,11 +201,13 @@ def extract(paths: Paths, force: bool = False) -> dict:
 
     checkpoint = _load_raw(raw)
     info = describe(checkpoint)
-    if info["text_vocab_size"] not in (None, vocab_size):
+    expected_rows = text_embed_rows(vocab_size)
+    if info["text_embed_rows"] not in (None, expected_rows):
         raise RuntimeError(
-            f"checkpoint text embedding has {info['text_vocab_size']} rows but "
-            f"{paths.sauti_vocab} has {vocab_size}; wrong vocab file - training would "
-            "silently remap every character"
+            f"checkpoint text embedding has {info['text_embed_rows']} rows but "
+            f"{paths.sauti_vocab} has {vocab_size} entries, so F5 would build "
+            f"{expected_rows} rows; wrong vocab file - training would silently remap "
+            "every character"
         )
     if not info["training_checkpoint"]:
         raise RuntimeError(
@@ -222,7 +229,8 @@ def extract(paths: Paths, force: bool = False) -> dict:
         "raw_bytes": raw_bytes,
         "ema_bytes": paths.sauti_ema_ckpt.stat().st_size,
         "ema_tensors": info["ema_tensors"],
-        "text_vocab_size": info["text_vocab_size"],
+        "text_embed_rows": info["text_embed_rows"],
+        "text_vocab_size": vocab_size,
         "vocab_size": vocab_size,
         "update": info["update"],
         "raw_deleted": deleted,

@@ -15,8 +15,10 @@ from sauti_sheng.checkpoint import (
     state_tensor_count,
     strip_to_ema,
     strip_to_online,
+    text_embed_rows,
     text_vocab_size,
     top_level_keys,
+    vocab_size_from_rows,
 )
 
 
@@ -37,7 +39,7 @@ class FakeTensor:
 
 def _ema():
     return {
-        "ema_model.transformer.text_embed.text_embed.weight": FakeTensor((2545, 512)),
+        "ema_model.transformer.text_embed.text_embed.weight": FakeTensor((2546, 512)),
         "ema_model.transformer.x": FakeTensor((2, 3)),
         "initted": True,
         "step": 15350,
@@ -117,18 +119,26 @@ def test_strip_to_online_is_a_single_key():
     assert list(strip_to_online(_release())) == [ONLINE_KEY]
 
 
-def test_text_vocab_size():
-    assert text_vocab_size(_ema()) == 2545
+def test_text_vocab_size_is_the_row_count_not_the_vocab_size():
+    assert text_vocab_size(_ema()) == 2546
     assert text_vocab_size({"transformer.x": FakeTensor((3,))}) is None
+
+
+def test_text_embed_is_one_row_larger_than_the_vocab():
+    # F5: TextEmbedding -> nn.Embedding(text_num_embeds + 1, text_dim)
+    assert text_embed_rows(2545) == 2546
+    assert vocab_size_from_rows(2546) == 2545
+    assert vocab_size_from_rows(text_embed_rows(2545)) == 2545
 
 
 def test_describe_summarises():
     info = describe(_release())
     assert info["training_checkpoint"] is True
+    assert info["text_embed_rows"] == 2546
     assert info["text_vocab_size"] == 2545
     assert info["ema_tensors"] == 2
     assert info["update"] == 15350
-    assert info["ema_bytes"] == (2545 * 512 + 6) * 4
+    assert info["ema_bytes"] == (2546 * 512 + 6) * 4
 
 
 def test_state_helpers():

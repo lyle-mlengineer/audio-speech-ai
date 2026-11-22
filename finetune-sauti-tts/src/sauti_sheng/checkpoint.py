@@ -120,8 +120,30 @@ def strip_to_online(checkpoint: dict) -> dict:
     return {ONLINE_KEY: select_state_dict(checkpoint, use_ema=False)}
 
 
+#: F5's ``TextEmbedding`` does ``nn.Embedding(text_num_embeds + 1, text_dim)``
+#: ("use 0 as filler token"), so the checkpoint's text embedding always has one
+#: row more than the vocab file has lines. ``F5TTS_v1_Base`` is the proof: its
+#: ``vocab.txt`` has 2545 lines and its ``text_embed.weight`` is ``[2546, 512]``.
+TEXT_EMBED_EXTRA_ROWS = 1
+
+
+def text_embed_rows(vocab_size: int) -> int:
+    """Rows F5's text embedding has for a vocab of ``vocab_size`` characters."""
+    return int(vocab_size) + TEXT_EMBED_EXTRA_ROWS
+
+
+def vocab_size_from_rows(rows: int) -> int:
+    """Tokenizer size implied by a checkpoint's text-embedding row count."""
+    return int(rows) - TEXT_EMBED_EXTRA_ROWS
+
+
 def text_vocab_size(state: dict) -> int | None:
-    """Rows of the text embedding = tokenizer size the checkpoint was trained with."""
+    """Rows of the text embedding.
+
+    This is *not* the vocab size: F5 adds a filler row, so subtract
+    :data:`TEXT_EMBED_EXTRA_ROWS` (or use :func:`vocab_size_from_rows`) before
+    comparing with ``len(read_vocab(...))``.
+    """
     for key, value in state.items():
         if str(key).endswith("transformer.text_embed.text_embed.weight"):
             shape = getattr(value, "shape", None)
@@ -148,6 +170,7 @@ def describe(checkpoint: dict) -> dict:
     """Small JSON-able summary for the model report."""
     ema = checkpoint.get(EMA_KEY) if isinstance(checkpoint.get(EMA_KEY), dict) else {}
     online = checkpoint.get(ONLINE_KEY) if isinstance(checkpoint.get(ONLINE_KEY), dict) else {}
+    rows = text_vocab_size(ema) or text_vocab_size(online)
     return {
         "keys": top_level_keys(checkpoint),
         "training_checkpoint": looks_like_training_checkpoint(checkpoint),
@@ -155,6 +178,7 @@ def describe(checkpoint: dict) -> dict:
         "ema_bytes": state_nbytes(ema),
         "online_tensors": state_tensor_count(online),
         "online_bytes": state_nbytes(online),
-        "text_vocab_size": text_vocab_size(ema) or text_vocab_size(online),
+        "text_embed_rows": rows,
+        "text_vocab_size": vocab_size_from_rows(rows) if rows is not None else None,
         "update": checkpoint.get("update"),
     }
