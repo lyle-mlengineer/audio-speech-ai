@@ -1,0 +1,827 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<title>Fine-Tuning Chatterbox — Full, LoRA, and Component-Wise Recipes</title><style>
+@page { size: A4; margin: 16mm 15mm 18mm 15mm; }
+* { box-sizing: border-box; }
+html { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+body {
+  font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  font-size: 10.4pt; line-height: 1.52; color: #1a1a1a; margin: 0;
+  max-width: 100%;
+}
+h1 { font-size: 21pt; line-height: 1.2; margin: 0 0 4mm; color: #111;
+     border-bottom: 2.5pt solid #2d6cdf; padding-bottom: 3mm; page-break-before: auto; }
+h2 { font-size: 14.5pt; margin: 9mm 0 2mm; color: #14304f; page-break-after: avoid;
+     border-left: 3.5pt solid #2d6cdf; padding-left: 3mm; }
+h3 { font-size: 11.6pt; margin: 6mm 0 1.5mm; color: #1d4470; page-break-after: avoid; }
+h4 { font-size: 10.4pt; margin: 4mm 0 1mm; color: #333; page-break-after: avoid; }
+p { margin: 0 0 2.4mm; }
+ul, ol { margin: 0 0 2.6mm 5mm; padding-left: 3mm; }
+li { margin: 0.8mm 0; }
+li > p { margin: 0.5mm 0; }
+code {
+  font-family: "Cascadia Mono", Consolas, "Courier New", monospace;
+  font-size: 8.6pt; background: #f2f4f7; padding: 0.3mm 1.1mm;
+  border-radius: 1.5pt; color: #b3005f; word-break: break-word;
+}
+pre {
+  background: #f7f9fb; border: 0.5pt solid #dde3ea; border-left: 3pt solid #6f8fb8;
+  border-radius: 2pt; padding: 2.5mm 3mm; margin: 2mm 0 3mm; overflow-wrap: normal;
+  page-break-inside: avoid; white-space: pre-wrap;
+}
+pre code {
+  background: none; padding: 0; color: #16324f; font-size: 8.35pt; line-height: 1.38;
+  word-break: normal;
+}
+blockquote {
+  margin: 2.5mm 0; padding: 2mm 3mm; background: #fff8e6;
+  border-left: 3pt solid #e0a800; color: #4a3b00; page-break-inside: avoid;
+}
+blockquote p:last-child { margin-bottom: 0; }
+table {
+  border-collapse: collapse; width: 100%; margin: 2mm 0 4mm; font-size: 9.05pt;
+  page-break-inside: auto;
+}
+thead { display: table-header-group; }
+tr { page-break-inside: avoid; }
+th {
+  background: #eaf0f9; text-align: left; padding: 1.4mm 1.8mm;
+  border: 0.5pt solid #c3cfdd; font-weight: 600; color: #16324f;
+}
+td { padding: 1.3mm 1.8mm; border: 0.5pt solid #d7dee7; vertical-align: top; }
+tbody tr:nth-child(even) td { background: #fafbfd; }
+td code, th code { font-size: 8.1pt; }
+hr { border: none; border-top: 0.6pt solid #ccd4de; margin: 7mm 0; }
+a { color: #1c5bb8; text-decoration: none; }
+.docmeta {
+  font-size: 8.6pt; color: #5b6b7d; margin: 0 0 7mm; letter-spacing: 0.2pt;
+}
+h1 + .docmeta { margin-top: 2mm; }
+strong { color: #0d2b45; }
+</style></head>
+<body><h1>Fine-Tuning Chatterbox — Full, LoRA, and Component-Wise Recipes</h1>
+<p>Three ways to move Chatterbox toward a new voice or language, from most
+destructive to most surgical:</p>
+<table>
+<thead>
+<tr>
+<th>mode</th>
+<th>trainable</th>
+<th>data needed</th>
+<th>risk</th>
+<th>where it is implemented</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>A. full T3</strong></td>
+<td>541 M (all of T3)</td>
+<td>10 min - 10 h</td>
+<td>overfit / drift</td>
+<td><code>finetune-chatterbox</code> (existing)</td>
+</tr>
+<tr>
+<td><strong>B. LoRA on T3</strong></td>
+<td>~27 M (5 %)</td>
+<td>10 min - 10 h</td>
+<td>under-fit, adapter merge bugs</td>
+<td>not yet implemented here; recipe below</td>
+</tr>
+<tr>
+<td><strong>C. component-wise</strong></td>
+<td>text side <em>or</em> audio side only</td>
+<td>hours - 100 h</td>
+<td>forgetting, broken alignment</td>
+<td>recipe below</td>
+</tr>
+</tbody>
+</table>
+<p>All three share the property that <code>ve</code> and <code>s3gen</code> are frozen unless you
+explicitly open C-part-2. The freeze matrix is the whole design:</p>
+<pre><code>                    text side  |  shared trunk  |  audio side
+                    ---------- | -------------- | -----------
+tokenizer (JSON)      2454 ids            --              --
+text_emb / text_head    x                 --              --
+T3 text_pos_emb         x                 --              --
+Llama 30 layers         --              shared            --
+speech_emb/head         --                --              x
+speech_pos_emb          --                --              x
+cond_enc (spkr/prompt/
+  emotion)              --                --              x
+ve                      --                --        frozen (A,B,C)
+s3gen (tokenizer, CFM,
+  HiFT)                 --                --       frozen unless C2
+</code></pre>
+<p>The trunk is genuinely shared: there is no way to fine-tune &quot;language&quot; without
+touching parameters that also model audio. That is why the component recipes
+below separate the problem along <em>two</em> axes — which parameters get gradients,
+<strong>and</strong> which loss term is back-propagated.</p>
+<hr />
+<h1>1. Mode A — full T3 fine-tune (what this repo does today)</h1>
+<h2>1.1 Shape of the run</h2>
+<pre><code class="language-bash">sheng-chatterbox train --profile l4 --steps 600 --lr 5e-5 --max-hours 8
+# 38 clips x 30 s, effective batch 8, AdamW, warmup 50 + cosine, bf16
+</code></pre>
+<p><code>load_model</code> is the entire specification:</p>
+<pre><code class="language-python">for module_name in (&quot;ve&quot;, &quot;s3gen&quot;):
+    module = getattr(model, module_name); module.eval()
+    for p in module.parameters(): p.requires_grad_(False)
+model.t3.train()
+for p in model.t3.parameters(): p.requires_grad_(True)
+</code></pre>
+<h2>1.2 Memory and speed budget</h2>
+<table>
+<thead>
+<tr>
+<th>item</th>
+<th>fp16/bf16 bytes</th>
+<th>L4 24 GB</th>
+<th>T4 16 GB</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>T3 weights</td>
+<td>1.08 GB</td>
+<td>ok</td>
+<td>ok</td>
+</tr>
+<tr>
+<td>T3 gradients</td>
+<td>1.08 GB</td>
+<td>ok</td>
+<td>ok</td>
+</tr>
+<tr>
+<td>AdamW m, v (fp32)</td>
+<td>4.33 GB</td>
+<td>ok</td>
+<td>ok</td>
+</tr>
+<tr>
+<td>s3gen + ve (frozen)</td>
+<td>0.4 GB</td>
+<td>ok</td>
+<td>ok</td>
+</tr>
+<tr>
+<td>activations (batch 4 x ~600 tok, bf16)</td>
+<td>~3-5 GB</td>
+<td>ok</td>
+<td>tight</td>
+</tr>
+<tr>
+<td><strong>total</strong></td>
+<td></td>
+<td><strong>~10-12 GB</strong></td>
+<td><strong>~9-11 GB</strong> (batch 2 + accum 4)</td>
+</tr>
+</tbody>
+</table>
+<p>The trainer does <strong>not</strong> enable gradient checkpointing (the community kit does,
+for ~60 % activation savings). If you need to raise the batch on a 16 GB card,
+that is the first change to make.</p>
+<p>Throughput on an L4 is roughly 5-8 steps/s at effective batch 8 for 30 s clips
+(the featuriser is cached, so this is pure T3 forward/backward), i.e. 600 steps in
+~1.5-3 h.</p>
+<h2>1.3 What &quot;worked&quot; looks like</h2>
+<ul>
+<li><code>loss_text</code> falls fast (it is an easier, highly predictable target) and then
+plateaus around 0.1-0.4;</li>
+<li><code>loss_speech</code> falls from ~8.8 (uniform over 6561 codes) toward 1.5-3.0;</li>
+<li>held-out CER drops and speaker cosine rises versus the baseline (that is what
+<code>voice-clone compare</code> measures);</li>
+<li>listening: new Sheng sentences are intelligible <em>and</em> the timbre is the target.</li>
+</ul>
+<h2>1.4 The loss shift — fix before trusting a long run</h2>
+<p><code>T3.loss</code> scores position <code>p</code> against token <code>p</code>; generation samples token <code>p+1</code>.
+For fine-tuning, use the shifted, prompt-masked variant. Drop this into
+<code>train_t3.py</code> and call it from <code>batch_loss</code>:</p>
+<pre><code class="language-python">def shifted_losses(model, cond, text_tokens, text_lens, speech_tokens, speech_lens,
+                   prompt_tokens=None):
+    import torch, torch.nn.functional as F
+    out = model.t3.forward(t3_cond=cond, text_tokens=text_tokens,
+                           text_token_lens=text_lens, speech_tokens=speech_tokens,
+                           speech_token_lens=speech_lens, training=True)
+
+    IGNORE = -100
+    dev = out.speech_logits.device
+
+    speech_logits = out.speech_logits[:, :-1].transpose(1, 2)
+    speech_labels = speech_tokens[:, 1:]
+    n = speech_labels.size(1)
+    pad  = torch.arange(n, device=dev)[None, :] &gt;= (speech_lens[:, None] - 1)
+    # optional: do not train on copying the reference prompt
+    keep = 0 if prompt_tokens is None else prompt_tokens.size(1)
+    prm  = torch.arange(n, device=dev)[None, :] &lt; keep
+    speech_labels = speech_labels.masked_fill(pad | prm, IGNORE)
+    loss_speech = F.cross_entropy(speech_logits, speech_labels, ignore_index=IGNORE)
+
+    text_logits = out.text_logits[:, :-1].transpose(1, 2)
+    text_labels = text_tokens[:, 1:]
+    m = text_labels.size(1)
+    pad_t = torch.arange(m, device=dev)[None, :] &gt;= (text_lens[:, None] - 1)
+    text_labels = text_labels.masked_fill(pad_t, IGNORE)
+    loss_text = F.cross_entropy(text_logits, text_labels, ignore_index=IGNORE)
+    return loss_text + loss_speech, loss_text, loss_speech
+</code></pre>
+<p>Note <code>prompt_tokens</code> here means the <em>cond prompt</em> is <strong>not</strong> part of
+<code>speech_tokens</code> in this repo's featuriser, so the mask above is a no-op for
+<code>sheng_t3</code> — it matters when you build a dataset where the prompt is the prefix of
+the target (the common case in other kits).</p>
+<h2>1.5 When full fine-tune is the wrong tool</h2>
+<p>Full T3 fine-tune changes <em>everything</em> at once: pronunciation, prosody, timbre,
+pause statistics, and the mapping from the text prefix to the speech start. With
+20 minutes of data it will memorise. Prefer it when:</p>
+<ul>
+<li>you have <strong>≥ 5 h</strong> of one speaker and want maximum fidelity;</li>
+<li>or you want the model to speak a language/accent that is not already in the 23
+supported ones (a new phonology needs the text side to move, §3.3).</li>
+</ul>
+<p>Prefer LoRA (mode B) for anything under a few hours, which is exactly what the
+community guidance says (&quot;LoRA for anything under ~10 h&quot;).</p>
+<hr />
+<h1>2. Mode B — LoRA on T3</h1>
+<h2>2.1 Why it is the right default for small data</h2>
+<p>LoRA adds <code>B·A</code> (rank <code>r</code>) to each targeted linear layer, freezes the original
+weight, and therefore:</p>
+<ul>
+<li>updates a <strong>low-rank</strong> subspace — expressive enough for timbre/accent,
+restrained enough that it cannot rewire the language model;</li>
+<li>produces a <strong>5 MB adapter</strong> instead of a 1 GB checkpoint (a Colab Drive can hold
+dozens);</li>
+<li>lets you keep several voices and swap/merge them at export time.</li>
+</ul>
+<h2>2.2 Parameter arithmetic (r = 32, alpha = 64)</h2>
+<p>Per Llama layer, for <code>in = out = 1024</code> projections
+(<code>q_proj</code>, <code>k_proj</code>, <code>v_proj</code>, <code>o_proj</code>):</p>
+<pre><code>A (32 x 1024) + B (1024 x 32) = 65 536
+</code></pre>
+<p>For the SwiGLU MLP (<code>gate/up</code>: 1024 -&gt; 4096, <code>down</code>: 4096 -&gt; 1024):</p>
+<pre><code>A (32 x 1024) + B (4096 x 32) = 163 840   (each of the three)
+</code></pre>
+<p>Per layer: <code>4 x 65 536 + 3 x 163 840 = 753 664</code>. Times 30 layers = <strong>22.6 M</strong>,
+plus <code>spkr_enc</code> (<code>256 -&gt; 1024</code>: 40 960) ≈ <strong>22.65 M = 4.2 % of T3</strong>.</p>
+<p>If you also fully train the two embedding/head tensors
+(<code>modules_to_save = [&quot;text_emb&quot;, &quot;speech_head&quot;]</code>, 2.51 M each), total trainable is
+<strong>~27.7 M ≈ 5.1 %</strong>. AdamW state for that is ~0.4 GB: a 16 GB T4 becomes viable at
+batch 8.</p>
+<p>Scaling: PEFT computes <code>delta = (alpha / r) * B·A</code>, so <code>r=32, alpha=64</code> = scale 2.
+Raising <code>alpha</code> is the cheap way to make a small-rank adapter learn faster; raising
+<code>r</code> is what buys capacity.</p>
+<h2>2.3 Wiring LoRA into this trainer</h2>
+<p>The attention/MLP module names are exactly the HF Llama ones because <code>T3.tfmr</code> <em>is</em>
+<code>LlamaModel</code>; <code>spkr_enc</code> is the linear that projects the 256-d voice vector into
+the LM — including it is what lets a small adapter change <em>who</em> the model sounds
+like with very few parameters.</p>
+<pre><code class="language-python"># sheng_chatterbox/lora.py
+from peft import LoraConfig, get_peft_model
+
+T3_LORA_TARGETS = [&quot;q_proj&quot;, &quot;k_proj&quot;, &quot;v_proj&quot;, &quot;o_proj&quot;,
+                   &quot;gate_proj&quot;, &quot;up_proj&quot;, &quot;down_proj&quot;, &quot;spkr_enc&quot;]
+
+def wrap_lora(model, r: int = 32, alpha: int = 64, dropout: float = 0.05):
+    cfg = LoraConfig(
+        r=r, lora_alpha=alpha, lora_dropout=dropout, bias=&quot;none&quot;,
+        target_modules=T3_LORA_TARGETS,
+        modules_to_save=[&quot;text_emb&quot;, &quot;speech_head&quot;],   # trained fully, saved in the adapter
+    )
+    model.t3 = get_peft_model(model.t3, cfg)
+    model.t3.print_trainable_parameters()
+    return model
+</code></pre>
+<p>and in <code>train_t3.py::load_model</code>, after the freeze block:</p>
+<pre><code class="language-python">if args.lora:
+    from .lora import wrap_lora
+    model = wrap_lora(model, r=args.lora_r, alpha=args.lora_alpha)
+    trainable = [p for p in model.t3.parameters() if p.requires_grad]
+else:
+    trainable = list(model.t3.parameters())
+optimizer = torch.optim.AdamW(trainable, lr=args.lr, betas=(0.9, 0.95),
+                              weight_decay=args.weight_decay)
+</code></pre>
+<p>Plus the CLI surface the sibling project already forwards:</p>
+<pre><code class="language-python">p.add_argument(&quot;--lora&quot;, action=&quot;store_true&quot;)
+p.add_argument(&quot;--lora-r&quot;, type=int, default=32)
+p.add_argument(&quot;--lora-alpha&quot;, type=int, default=64)
+</code></pre>
+<blockquote>
+<p><strong>Current state:</strong> <code>voice-clone</code>'s <code>train</code> command accepts <code>--lora</code> and forwards
+it to <code>sheng_chatterbox.cli train</code>, which does not define it — argparse exits
+with &quot;unrecognized arguments: --lora&quot;. Adding the four lines above (and the
+checkpoint handling in §2.5) is the whole fix.</p>
+</blockquote>
+<h2>2.4 Hyperparameters that differ from full fine-tune</h2>
+<table>
+<thead>
+<tr>
+<th>item</th>
+<th>full</th>
+<th>LoRA</th>
+<th>reason</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>LR</td>
+<td>5e-5</td>
+<td><strong>1e-4</strong></td>
+<td>adapters are randomly initialised; a frozen backbone tolerates a larger step</td>
+</tr>
+<tr>
+<td>steps / epochs</td>
+<td>600 (~126 ep)</td>
+<td>300-600, or <code>epochs x batches/8</code></td>
+<td>the adapter needs more passes to fit, but overfits later</td>
+</tr>
+<tr>
+<td>batch</td>
+<td>8</td>
+<td>8</td>
+<td>unchanged</td>
+</tr>
+<tr>
+<td>weight decay</td>
+<td>0.01</td>
+<td>0.0-0.01</td>
+<td>only on LoRA B matrices; small effect</td>
+</tr>
+<tr>
+<td>warmup</td>
+<td>50</td>
+<td>20-50</td>
+<td></td>
+</tr>
+<tr>
+<td>grad clip</td>
+<td>1.0</td>
+<td>1.0</td>
+<td></td>
+</tr>
+<tr>
+<td>dtype</td>
+<td>bf16</td>
+<td>bf16</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<p>The community kit's defaults (<code>r=32, alpha=64, dropout=0.05, lr=1e-4, 10 epochs</code>)
+are a sane starting point; 10 epochs on 38 clips is only ~48 steps, which is
+<em>authored for their own multi-hour datasets</em>, not for 19 minutes. For Sheng,
+budget 200-400 steps.</p>
+<h2>2.5 Checkpointing an adapter, and merging for export</h2>
+<p><code>sheng_chatterbox</code> writes <code>t3_cfg.safetensors</code> with the full <code>state_dict</code>, which is
+what <code>ChatterboxMultilingualTTS.from_local</code> loads with <code>strict=True</code>. A LoRA
+adapter has entirely different key names, so it cannot be dropped in. Two
+supported patterns:</p>
+<p><strong>(a) save the adapter, merge on export</strong> — recommended:</p>
+<pre><code class="language-python"># in save_checkpoint(), LoRA branch
+model.t3.save_pretrained(step_dir / &quot;adapter&quot;)          # ~5 MB, keys: ...lora_A/B
+</code></pre>
+<pre><code class="language-python"># in infer.py::export(), LoRA branch
+from peft import PeftModel
+from safetensors.torch import save_file
+
+base = ChatterboxMultilingualTTS.from_local(paths.pretrained_dir, &quot;cpu&quot;,
+                                             t3_model=MTL_T3_MODEL)
+peft_t3 = PeftModel.from_pretrained(base.t3, str(ckpt / &quot;adapter&quot;))
+merged  = peft_t3.merge_and_unload()                    # -&gt; plain T3
+save_file({k: v.half() for k, v in merged.state_dict().items()},
+          str(target / &quot;t3_cfg.safetensors&quot;))
+</code></pre>
+<p><code>merge_and_unload</code> folds <code>(alpha/r)·B·A</code> into each frozen weight and restores the
+<code>modules_to_save</code> copies, so the result is a normal T3 checkpoint that needs no
+PEFT at inference. This is the only way to keep the <code>export</code> contract intact.</p>
+<p><strong>(b) merge every save</strong> — simpler for the rest of the pipeline (every checkpoint
+is a full T3), but each save writes ~1 GB and re-merging 3 checkpoints per run
+costs a few seconds of CPU:</p>
+<pre><code class="language-python">merged = model.t3.merge_and_unload()
+save_file(_to_fp16_state(merged.state_dict()), str(step_dir / CKPT_NAME))
+</code></pre>
+<p>Note that (b) mutates <code>model.t3</code> (the PeftModel is consumed), so keep a reference
+to the adapter module if you intend to continue training after a save.</p>
+<h2>2.6 Judging a LoRA run</h2>
+<p>LoRA's characteristic failure is <em>under-fitting with confident prosody</em>: the voice
+shifts a little, the words stay right, nothing improves. Signs and fixes:</p>
+<table>
+<thead>
+<tr>
+<th>sign</th>
+<th>meaning</th>
+<th>fix</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>adapter loss barely moves below the base loss</td>
+<td>rank too small or LR too low</td>
+<td><code>r=64</code>, <code>lr=2e-4</code>, include <code>text_emb</code>/<code>speech_head</code> in <code>modules_to_save</code></td>
+</tr>
+<tr>
+<td>voice changes, words degrade</td>
+<td>over-fit / LR too high</td>
+<td>fewer steps, <code>lora_dropout=0.1</code></td>
+</tr>
+<tr>
+<td>merged output differs from training-time output</td>
+<td>merge bug (alpha/r, or <code>modules_to_save</code> dropped)</td>
+<td>compare logits on one batch pre/post merge; they must match to 1e-3</td>
+</tr>
+</tbody>
+</table>
+<h2>That last check is cheap and worth scripting; silent merge bugs are the most
+common way a good adapter produces bad audio.</h2>
+<h1>3. Mode C — separate language-side and audio-side fine-tuning</h1>
+<p>&quot;Language component&quot; and &quot;audio component&quot; are not separate modules in this
+architecture — the trunk is shared. What <em>is</em> separable is:</p>
+<ol>
+<li><strong>which parameters require gradients</strong> (text-side tables vs audio-side tables
+vs the shared trunk), and</li>
+<li><strong>which loss term you back-propagate</strong> (<code>loss_text</code>, <code>loss_speech</code>, or the CFM
+mel loss).</li>
+</ol>
+<p>Every recipe in this section is a combination of those two levers. Nothing here
+is implemented in the repo yet; the code is written to drop into
+<code>finetune-chatterbox</code>.</p>
+<h2>3.1 The loss-level split</h2>
+<p><code>T3.forward</code> always produces both streams, so you can choose what to learn:</p>
+<pre><code class="language-python">out = model.t3.forward(..., training=True)
+loss_text   = F.cross_entropy(out.text_logits[:, :-1].transpose(1,2), text_labels,  ignore_index=-100)
+loss_speech = F.cross_entropy(out.speech_logits[:, :-1].transpose(1,2), speech_labels, ignore_index=-100)
+
+loss = {&quot;text&quot;: loss_text, &quot;speech&quot;: loss_speech, &quot;both&quot;: loss_text + loss_speech}[mode]
+</code></pre>
+<ul>
+<li><strong>text-only</strong> teaches orthography -&gt; token behaviour: how a language's strings
+should be chunked, how <code>[xx]</code> tags and non-verbal tags behave. It cannot change
+<em>pronunciation</em>, because pronunciation lives in the speech stream.</li>
+<li><strong>speech-only</strong> teaches delivery: timbre, accent, prosody, speaking rate. It
+cannot fix a tokenizer that splits a new script badly.</li>
+<li><strong>both</strong> (default) is what a normal SFT run does.</li>
+</ul>
+<p>A practical schedule that avoids fighting yourself: 20-50% of steps text-only to
+adapt the text side without disturbing audio, then switch to <code>both</code>.</p>
+<h2>3.2 Language-side fine-tune (case 1: language already supported)</h2>
+<p><code>sw</code> is already id 730 in a 2454-id vocabulary, and Swahili has no special
+text preprocessing (<code>MTLTokenizer.encode</code> only special-cases <code>zh</code>, <code>ja</code>, <code>he</code>,
+<code>ko</code>, <code>ru</code>). So for a Swahili-family target there is nothing to fix in the
+tokenizer; the language-side recipe is about <em>register</em> — Sheng slang spellings,
+English content words inside Swahili grammar.</p>
+<pre><code class="language-python"># freeze everything audio-side; train the text tables + a text-only LoRA
+for name in (&quot;speech_emb&quot;, &quot;speech_head&quot;, &quot;speech_pos_emb&quot;, &quot;cond_enc&quot;):
+    for p in getattr(model.t3, name).parameters():
+        p.requires_grad_(False)
+for name in (&quot;text_emb&quot;, &quot;text_head&quot;, &quot;text_pos_emb&quot;):
+    for p in getattr(model.t3, name).parameters():
+        p.requires_grad_(True)
+
+# LoRA only on the *front* half of the trunk is an approximation: attention is
+# shared, so restrict capacity instead of pretending layers are language-specific
+lora = LoraConfig(r=16, lora_alpha=32, lora_dropout=0.05, bias=&quot;none&quot;,
+                  target_modules=[&quot;q_proj&quot;, &quot;v_proj&quot;])   # cheapest useful subset
+</code></pre>
+<ul>
+<li>LR: text embeddings tolerate <code>2e-4</code>, the trunk adapter <code>5e-5</code>.</li>
+<li>Loss: <code>text</code> for the first ~50 steps, then <code>both</code> (text weight 0.3-0.5).</li>
+<li>Data: transcripts matter more than audio here. 100-500 utterances of <em>correct</em>
+orthography in the target register is enough to make the tokenizer/mapping
+behaviour consistent; do not &quot;normalise&quot; Sheng into standard Swahili.</li>
+</ul>
+<p>Effect you should expect: fewer skipped/garbled function words, better handling of
+English insertions, fewer <code>[UNK]</code>. <strong>Not</strong> a new accent, and not new vocabulary
+pronunciation.</p>
+<h2>3.3 Language-side fine-tune (case 2: language not in the vocabulary)</h2>
+<p>If the target language (or a non-verbal tag you need) is not in the 2454 ids, you
+must extend the vocabulary. That is a bigger change than it looks, because three
+things are hard-coded to 2454.</p>
+<pre><code class="language-python"># 1) tokenizer: add the new symbols and keep one id space
+from tokenizers import Tokenizer
+tok = Tokenizer.from_file(&quot;grapheme_mtl_merged_expanded_v1.json&quot;)
+tok.add_tokens([&quot;[lg]&quot;] + list(new_graphemes), beginning_of_sequence=False)
+
+# 2) resize the three text-side tensors; mean-init keeps the LM in-distribution
+import torch, torch.nn as nn
+old = model.t3.text_emb.num_embeddings
+new_ids = tok.get_vocab_size()
+model.t3.text_emb = nn.Embedding(new_ids, 1024)
+model.t3.text_head = nn.Linear(1024, new_ids, bias=False)
+with torch.no_grad():
+    model.t3.text_emb.weight[:old] = old_state[&quot;text_emb.weight&quot;]
+    model.t3.text_emb.weight[old:] = old_state[&quot;text_emb.weight&quot;].mean(0, keepdim=True)
+    model.t3.text_head.weight[:old] = old_state[&quot;text_head.weight&quot;]
+    model.t3.text_head.weight[old:] = old_state[&quot;text_head.weight&quot;].mean(0, keepdim=True)
+
+# 3) THE TRAP: alignment watchdog switches itself off
+model.t3.hp.text_tokens_dict_size = new_ids
+#   T3Config.is_multilingual == (text_tokens_dict_size == 2454)
+#   -&gt; False, so AlignmentStreamAnalyzer is never attached and long texts can
+#      run away. Patch it explicitly:
+model.t3.hp._is_multilingual = True
+T3Config.is_multilingual = property(lambda self: True)
+</code></pre>
+<p>Also in the trainer: <code>hp.start_text_token</code>/<code>stop_text_token</code> are 255/0 and the
+tokenizer's <code>[START]</code>/<code>[STOP]</code> are the same ids, so extending at the <em>end</em> of the
+id space is safe; inserting tokens in the middle silently corrupts every prompt.</p>
+<p>Recipe: freeze everything, train only the new rows for ~100 steps with
+<code>loss_text</code>, then unfreeze <code>text_emb</code>/<code>text_head</code> + LoRA <code>q/k/v/o</code> and train
+<code>both</code> at <code>5e-5</code>. Data: ≥ 5 h for a genuinely new phonology is the realistic bar;
+anything less and the model will read the new script with the nearest existing
+phonology, which is usually worse than transliterating into Latin script and
+staying in-distribution.</p>
+<h2>3.4 Audio-side fine-tune (identity / timbre, no text changes)</h2>
+<p>The audio side of T3 is <code>speech_emb</code>, <code>speech_head</code>, <code>speech_pos_emb</code> and
+<code>cond_enc</code>. <code>cond_enc</code> is where identity enters:</p>
+<pre><code>speaker_emb (256) --spkr_enc--&gt; (1, 1024)     \
+prompt_tokens (150) --perceiver--&gt; (32, 1024)  &gt;-- prefix --trunk
+emotion_adv (scalar) --fc--&gt; (1, 1024)        /
+</code></pre>
+<p>So &quot;audio component fine-tuning&quot; means one of two things:</p>
+<p><strong>(a) conditioning-only (cheap, safe, limited).</strong> Train <code>cond_enc.spkr_enc</code> and
+<code>cond_enc.perceiver</code> plus <code>speech_head</code>, with the trunk frozen and
+<code>loss = loss_speech</code>:</p>
+<pre><code class="language-python">trainable = [&quot;cond_enc&quot;, &quot;speech_head&quot;, &quot;speech_emb&quot;]
+</code></pre>
+<p>This can re-map <em>how</em> a 256-d voice vector is interpreted, and re-weight which
+latents the perceiver keeps. It cannot change prosody much — that lives in the
+trunk. Useful when you have seconds-to-minutes of a new speaker and want to nudge
+identity without any risk to language behaviour. LR <code>1e-3</code> is safe here because
+so little is trainable; 200-400 steps.</p>
+<p><strong>(b) trunk LoRA restricted to the audio path.</strong> LoRA on <code>gate/up/down_proj</code>
+(MLP, where acoustic detail tends to live) plus full <code>spkr_enc</code> + <code>speech_head</code>,
+trained with <code>loss = loss_speech</code> and text embeddings frozen:</p>
+<pre><code class="language-python">LoraConfig(r=32, lora_alpha=64, target_modules=[&quot;gate_proj&quot;,&quot;up_proj&quot;,&quot;down_proj&quot;,&quot;spkr_enc&quot;],
+           modules_to_save=[&quot;speech_head&quot;], bias=&quot;none&quot;)
+</code></pre>
+<p>This is the honest &quot;tune the audio component&quot; for a voice-conversion goal:
+the text side is untouched, so pronunciation and vocabulary are preserved, while
+timbre/prosody move. Risk: without the text loss, alignment slowly degrades after
+many steps — keep it short (≤ 300) and monitor CER on the fixed prompt set.</p>
+<h2>3.5 s3gen fine-tuning (the actual <em>audio model</em>)</h2>
+<p>Only worth doing if you have <strong>≥ 1-5 h of 24 kHz</strong> audio from the target domain.
+Two bad outcomes are guaranteed otherwise: the CFM collapses to a blur, or the
+HiFT vocoder learns the recording channel (clicks, noise) as part of the voice.
+The repo's 16 kHz training WAVs are <strong>not</strong> usable here.</p>
+<p>What to unfreeze, in order of risk:</p>
+<table>
+<thead>
+<tr>
+<th>piece</th>
+<th>unfreeze?</th>
+<th>why</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>flow.encoder</code> (UpsampleConformer)</td>
+<td>no</td>
+<td>tokens -&gt; content; a small dataset will corrupt alignment</td>
+</tr>
+<tr>
+<td><code>flow.encoder_proj</code></td>
+<td>optional</td>
+<td>cheap adapter on the mel-rate features</td>
+</tr>
+<tr>
+<td><code>flow.spk_embed_affine_layer</code></td>
+<td>yes</td>
+<td>192 -&gt; 80 identity projection, 15 k params</td>
+</tr>
+<tr>
+<td><code>flow.decoder</code> (velocity estimator)</td>
+<td>yes</td>
+<td>where the timbre/texture is actually generated</td>
+</tr>
+<tr>
+<td><code>mel2wav</code> (HiFT)</td>
+<td><strong>last</strong>, or never</td>
+<td>needs adversarial training; at this data scale it only adds artefacts</td>
+</tr>
+</tbody>
+</table>
+<p>Data prep must reproduce <code>embed_ref</code> exactly: 24 kHz mono, <code>n_fft 1920</code>,
+<code>hop 480</code>, 80 mels, <code>fmax 8000</code>, 2 mel frames per 40 ms token; prompt window up to
+10 s (<code>DEC_COND_LEN</code>), <code>prompt_feat</code> from the reference, <code>prompt_token</code> from the
+16 kHz copy.</p>
+<p>The loss is already in the package (<code>flow_matching.compute_loss</code>), so a minimal
+trainer is:</p>
+<pre><code class="language-python">for batch in loader:                        # x1 = target mel (1, 80, T)
+    mu    = encoder_proj(encoder(input_embedding(cat([prompt_token, tokens]))))
+    spks  = spk_embed_affine_layer(F.normalize(campplus(wav16k), dim=1))
+    cond  = cat([prompt_feat, zeros(...)])[:, :, :T]
+    loss  = cfm.compute_loss(x1, mask, mu=mu, spks=spks, cond=cond)   # uses training_cfg_rate=0.2
+</code></pre>
+<ul>
+<li>LR <code>1e-4</code> for <code>decoder</code> + affine layer, <code>1e-5</code> if you also open <code>encoder_proj</code>;</li>
+<li>batch 4-8 clips of 5-15 s, gradient clip 1.0, 1 000-5 000 steps;</li>
+<li>monitor (i) mel L1 on held-out clips, (ii) speaker cosine of the <em>output</em>-vs-
+reference through ECAPA (not through <code>ve</code> — that is a different embedding space),
+(iii) a spectral-distance sanity check;</li>
+<li>always regenerate through the frozen HiFT and listen for the channel-noise
+tell-tale (a fixed hiss or room tone that follows the reference, not the text).</li>
+</ul>
+<p>The frozen-HiFT assumption is also your safety net: whatever the CFM does, the
+vocoder's F0/harmonic structure is unchanged, so degraded output usually means
+&quot;bad mel&quot;, not &quot;bad voice&quot;.</p>
+<h2>3.6 Choosing a mode</h2>
+<table>
+<thead>
+<tr>
+<th>goal</th>
+<th>data</th>
+<th>mode</th>
+<th>loss</th>
+<th>trainable</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>clone one speaker (this repo)</td>
+<td>20 min - 5 h</td>
+<td>A (full T3) or B (LoRA)</td>
+<td>both</td>
+<td>all T3 / adapters</td>
+</tr>
+<tr>
+<td>2-10 voices, keep them separate</td>
+<td>10-60 min each</td>
+<td>B</td>
+<td>both</td>
+<td>5 MB adapter per voice</td>
+</tr>
+<tr>
+<td>fix orthography / new tags, keep voice</td>
+<td>100-500 utts text</td>
+<td>C 3.2</td>
+<td>text then both</td>
+<td>text tables</td>
+</tr>
+<tr>
+<td>new script / new phonology</td>
+<td>5 h+</td>
+<td>C 3.3</td>
+<td>text warmup then both</td>
+<td>text tables + LoRA</td>
+</tr>
+<tr>
+<td>nudge identity, tiny data</td>
+<td>seconds-minutes</td>
+<td>C 3.4a</td>
+<td>speech</td>
+<td><code>cond_enc</code>, <code>speech_head</code></td>
+</tr>
+<tr>
+<td>preserve pronunciation, change timbre</td>
+<td>1 h+</td>
+<td>C 3.4b</td>
+<td>speech</td>
+<td>MLP LoRA + <code>spkr_enc</code></td>
+</tr>
+<tr>
+<td>repair/adapt the vocoder to a domain</td>
+<td>1-5 h @ 24 kHz</td>
+<td>C 3.5</td>
+<td>CFM MSE + (HiFT adv.)</td>
+<td><code>flow.decoder</code></td>
+</tr>
+</tbody>
+</table>
+<p>Rule of thumb that falls out of the parameter counts: <strong>if your data would not
+fill a single epoch of a 541 M-parameter model, do not give it that many
+parameters.</strong> 20 minutes is 4800 clip-passes at effective batch 8 — enough to
+memorise, not enough to generalise, so constrain the update (LoRA) or the
+supervised surface (component).</p>
+<hr />
+<h1>4. Guard rails that apply to all modes</h1>
+<h2>4.1 Fix the evaluation before you train</h2>
+<p>You cannot compare two runs whose prompts changed. <code>voice-clone</code> already enforces
+this: 7 frozen prompts, 3 buckets (<code>sheng</code>, <code>swahili</code>, <code>english</code>), one reference
+clip from validation only. Keep that invariant for every mode here.</p>
+<p>Minimum report per checkpoint:</p>
+<pre><code>ok clips (not silent / not clipped / not runaway)   baseline vs tuned
+CER mean (ASR judge, whisper-small)                 baseline vs tuned
+speaker cosine (ECAPA vs reference clip)            baseline vs tuned
+UTMOS or a MOS proxy, if you have it
+</code></pre>
+<p>Verdict logic already implemented in <code>metrics.judge</code>: <code>KEEP</code> only when the words
+did not get worse <em>and</em> the speaker got closer; <code>REJECT</code> when either flips badly;
+<code>MIXED</code> otherwise — and <code>MIXED</code> is the normal outcome for a 20-minute fine-tune.</p>
+<h2>4.2 The three-checkpoint rule</h2>
+<p>Save at 100-step intervals, listen to three of them (early / middle / last), and
+pick the <em>earliest</em> that sounds like the target. Every symptom of overfitting is
+audible before it is measurable:</p>
+<ul>
+<li>reciting training sentences for any prompt;</li>
+<li>a rising <code>[STOP]</code> rate (clips end mid-word) or a falling one (runaway);</li>
+<li>timbre that is <em>more</em> like the reference clip than the dataset average — that is
+prompt leakage, not cloning.</li>
+</ul>
+<h2>4.3 Determinism</h2>
+<p><code>generate</code> samples (<code>do_sample=True</code>, temperature 0.8, min_p 0.05). Two eval runs
+with different seeds are not comparable clip-by-clip; <code>voice-clone</code> seeds with
+1337 for exactly this reason. Set <code>torch.manual_seed(seed)</code> before synthesis, and
+prefer comparing aggregate CER/cosine over 7 prompts rather than a single clip.</p>
+<h2>4.4 What not to do</h2>
+<ul>
+<li>Do not fine-tune <code>ve</code>. It is the <em>measurement</em> of identity in the other project's
+scorer; training it turns evaluation into self-fulfilment.</li>
+<li>Do not change <code>exaggeration</code> between training and inference (0.5 both).</li>
+<li>Do not train on 24 kHz audio with the 16 kHz featuriser, or vice versa — the S3
+tokenizer's rate assumptions are strict and the failure is silent.</li>
+<li>Do not ship a watermarked-vs-unwatermarked comparison as a metric delta.</li>
+</ul>
+<hr />
+<h1>5. Appendix — checklists</h1>
+<h2>5.1 Adding LoRA to <code>finetune-chatterbox</code> (complete)</h2>
+<pre><code class="language-text">[ ] new file src/sheng_chatterbox/lora.py         (config + wrap_lora)
+[ ] train_t3.build_parser: --lora, --lora-r, --lora-alpha
+[ ] train_t3.load_model: wrap after freezing ve/s3gen
+[ ] train_t3.train: optimizer over requires_grad params only (already does)
+[ ] train_t3.save_checkpoint: LoRA -&gt; save_pretrained(step/adapter)
+[ ] infer.load_finetuned: detect step/adapter, PeftModel.from_pretrained, merge
+[ ] infer.export: merge before writing t3_cfg.safetensors
+[ ] voice-clone/train: stop forwarding --lora (or keep, now that it exists)
+[ ] test: merged logits == training logits on one fixed batch (rtol 1e-3)
+</code></pre>
+<h2>5.2 Verifying a merge</h2>
+<pre><code class="language-python">import torch
+with torch.no_grad():
+    a = peft_model.forward(**batch)          # adapter active
+    b = merged.forward(**batch)              # folded weights
+for k in (&quot;speech_logits&quot;, &quot;text_logits&quot;):
+    assert torch.allclose(a[k].float(), b[k].float(), atol=1e-3), k
+</code></pre>
+<p>If this fails, the fold used the wrong <code>alpha/r</code>, or <code>modules_to_save</code> tensors were
+dropped during the merge. Bad audio from a &quot;good&quot; adapter is almost always this.</p>
+<h2>5.3 Reference hyperparameters, all modes</h2>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>full</th>
+<th>LoRA</th>
+<th>text-side</th>
+<th>audio-side</th>
+<th>s3gen</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>LR</td>
+<td>5e-5</td>
+<td>1e-4</td>
+<td>2e-4 (emb) / 5e-5 (adapter)</td>
+<td>1e-3 (cond only) / 1e-4</td>
+<td>1e-4</td>
+</tr>
+<tr>
+<td>steps</td>
+<td>200-600</td>
+<td>200-600</td>
+<td>100-300</td>
+<td>200-400</td>
+<td>1k-5k</td>
+</tr>
+<tr>
+<td>effective batch</td>
+<td>8</td>
+<td>8</td>
+<td>8</td>
+<td>8</td>
+<td>4-8 clips</td>
+</tr>
+<tr>
+<td>warmup</td>
+<td>50</td>
+<td>20-50</td>
+<td>10</td>
+<td>20</td>
+<td>100</td>
+</tr>
+<tr>
+<td>clip</td>
+<td>1.0</td>
+<td>1.0</td>
+<td>1.0</td>
+<td>1.0</td>
+<td>1.0</td>
+</tr>
+<tr>
+<td>dtype</td>
+<td>bf16</td>
+<td>bf16</td>
+<td>bf16</td>
+<td>bf16</td>
+<td>fp32/bf16</td>
+</tr>
+<tr>
+<td>checkpoint</td>
+<td>1 GB</td>
+<td>5 MB</td>
+<td>5-40 MB</td>
+<td>30 MB</td>
+<td>700 MB</td>
+</tr>
+</tbody>
+</table>
+</body></html>

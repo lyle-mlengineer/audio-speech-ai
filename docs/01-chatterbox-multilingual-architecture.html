@@ -1,0 +1,1024 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<title>Chatterbox Multilingual — Architecture and Tensor Flow Walkthrough</title><style>
+@page { size: A4; margin: 16mm 15mm 18mm 15mm; }
+* { box-sizing: border-box; }
+html { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+body {
+  font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  font-size: 10.4pt; line-height: 1.52; color: #1a1a1a; margin: 0;
+  max-width: 100%;
+}
+h1 { font-size: 21pt; line-height: 1.2; margin: 0 0 4mm; color: #111;
+     border-bottom: 2.5pt solid #2d6cdf; padding-bottom: 3mm; page-break-before: auto; }
+h2 { font-size: 14.5pt; margin: 9mm 0 2mm; color: #14304f; page-break-after: avoid;
+     border-left: 3.5pt solid #2d6cdf; padding-left: 3mm; }
+h3 { font-size: 11.6pt; margin: 6mm 0 1.5mm; color: #1d4470; page-break-after: avoid; }
+h4 { font-size: 10.4pt; margin: 4mm 0 1mm; color: #333; page-break-after: avoid; }
+p { margin: 0 0 2.4mm; }
+ul, ol { margin: 0 0 2.6mm 5mm; padding-left: 3mm; }
+li { margin: 0.8mm 0; }
+li > p { margin: 0.5mm 0; }
+code {
+  font-family: "Cascadia Mono", Consolas, "Courier New", monospace;
+  font-size: 8.6pt; background: #f2f4f7; padding: 0.3mm 1.1mm;
+  border-radius: 1.5pt; color: #b3005f; word-break: break-word;
+}
+pre {
+  background: #f7f9fb; border: 0.5pt solid #dde3ea; border-left: 3pt solid #6f8fb8;
+  border-radius: 2pt; padding: 2.5mm 3mm; margin: 2mm 0 3mm; overflow-wrap: normal;
+  page-break-inside: avoid; white-space: pre-wrap;
+}
+pre code {
+  background: none; padding: 0; color: #16324f; font-size: 8.35pt; line-height: 1.38;
+  word-break: normal;
+}
+blockquote {
+  margin: 2.5mm 0; padding: 2mm 3mm; background: #fff8e6;
+  border-left: 3pt solid #e0a800; color: #4a3b00; page-break-inside: avoid;
+}
+blockquote p:last-child { margin-bottom: 0; }
+table {
+  border-collapse: collapse; width: 100%; margin: 2mm 0 4mm; font-size: 9.05pt;
+  page-break-inside: auto;
+}
+thead { display: table-header-group; }
+tr { page-break-inside: avoid; }
+th {
+  background: #eaf0f9; text-align: left; padding: 1.4mm 1.8mm;
+  border: 0.5pt solid #c3cfdd; font-weight: 600; color: #16324f;
+}
+td { padding: 1.3mm 1.8mm; border: 0.5pt solid #d7dee7; vertical-align: top; }
+tbody tr:nth-child(even) td { background: #fafbfd; }
+td code, th code { font-size: 8.1pt; }
+hr { border: none; border-top: 0.6pt solid #ccd4de; margin: 7mm 0; }
+a { color: #1c5bb8; text-decoration: none; }
+.docmeta {
+  font-size: 8.6pt; color: #5b6b7d; margin: 0 0 7mm; letter-spacing: 0.2pt;
+}
+h1 + .docmeta { margin-top: 2mm; }
+strong { color: #0d2b45; }
+</style></head>
+<body><h1>Chatterbox Multilingual — Architecture and Tensor Flow Walkthrough</h1>
+<p>A line-by-line structural map of <code>ResembleAI/chatterbox</code> (the <strong>multilingual</strong>,
+23-language checkpoint this repository fine-tunes) and a complete trace of the
+tensors from a text string to a 24 kHz waveform.</p>
+<p>Everything here is read from the shipped source, not from memory:</p>
+<table>
+<thead>
+<tr>
+<th>source</th>
+<th>what it is</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>chatterbox-tts==0.1.7</code> (PyPI wheel)</td>
+<td>the version whose weight filenames match <code>finetune-chatterbox</code> (<code>t3_mtl23ls_v2.safetensors</code>, <code>grapheme_mtl_merged_expanded_v1.json</code>)</td>
+</tr>
+<tr>
+<td><code>resemble-ai/chatterbox</code> @ <code>master</code></td>
+<td>current <code>mtl_tts.py</code> — adds the <code>t3_model=</code> argument that <code>sheng_chatterbox</code> uses</td>
+</tr>
+<tr>
+<td><code>grapheme_mtl_merged_expanded_v1.json</code></td>
+<td>the real multilingual text vocabulary (2454 entries; read directly)</td>
+</tr>
+</tbody>
+</table>
+<p>Field names in <code>code font</code> are exact identifiers, so you can grep them:</p>
+<pre><code class="language-bash">python -c &quot;import chatterbox, os; print(os.path.dirname(chatterbox.__file__))&quot;
+</code></pre>
+<hr />
+<h2>1. The four artifacts</h2>
+<p>Chatterbox is not one network. It is four frozen artifacts plus one small
+conditioning object, and the repo's fine-tune touches exactly one of them.</p>
+<pre><code>ResembleAI/chatterbox/                (~2 GB, MIT)
+├── t3_mtl23ls_v2.safetensors        T3: 0.5B Llama  -&gt; text tokens to speech tokens
+├── s3gen.pt                         S3Gen: S3 tokens -&gt; 24 kHz waveform
+│     ├── tokenizer.*                S3 speech tokenizer (6561 codes @ 25 Hz)
+│     ├── speaker_encoder.*          CAMPPlus x-vector (192-d) for the decoder
+│     ├── flow.*                     CausalMaskedDiffWithXvec (conformer + CFM)
+│     └── mel2wav.*                  HiFTGenerator (HiFi-GAN + F0 harmonic source)
+├── ve.pt                            voice encoder (Resemblyzer GE2E, 256-d)
+├── grapheme_mtl_merged_expanded_v1.json   BPE over characters, 2454 ids, 23 [lang] tags
+└── conds.pt                         one built-in voice (Conditionals: T3Cond + s3gen ref_dict)
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>module</th>
+<th>params</th>
+<th>trainable in <code>finetune-chatterbox</code></th>
+<th>trainable in <code>voice-clone</code></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>t3</code></td>
+<td>~522 M</td>
+<td><strong>yes (full)</strong></td>
+<td>yes (via the same trainer)</td>
+</tr>
+<tr>
+<td><code>s3gen</code> (tokenizer + CFM + HiFT + x-vector)</td>
+<td>~200 M</td>
+<td>frozen</td>
+<td>frozen</td>
+</tr>
+<tr>
+<td><code>ve</code> (voice encoder)</td>
+<td>~4.5 M</td>
+<td>frozen</td>
+<td>frozen</td>
+</tr>
+<tr>
+<td>tokenizer</td>
+<td>0 (JSON)</td>
+<td>frozen</td>
+<td>frozen</td>
+</tr>
+</tbody>
+</table>
+<p><code>train_t3.py</code> freezes <code>ve</code> and <code>s3gen</code> and trains only <code>t3</code>:</p>
+<pre><code class="language-python">for module_name in (&quot;ve&quot;, &quot;s3gen&quot;):
+    module = getattr(model, module_name)
+    module.eval()
+    for param in module.parameters():
+        param.requires_grad_(False)
+model.t3.train()
+for param in model.t3.parameters():
+    param.requires_grad_(True)
+</code></pre>
+<p>That single decision is the reason the whole pipeline below is safe to fine-tune:
+no matter how badly the LM is trained, the vocoder still renders clean 24 kHz
+audio — a broken T3 produces <em>wrong tokens</em>, not <em>noise</em>.</p>
+<hr />
+<h2>2. End-to-end block diagram</h2>
+<p>Rates are the contract that keeps the two halves glued together.</p>
+<pre><code>            &quot;Sasa wewe, unajua...&quot;          ref_clip.wav (6 s)
+                     │                            │
+        ┌────────────▼─────────────┐              │
+        │ MTLTokenizer (BPE/char)  │              │
+        │ + [sw] tag               │              │
+        └────────────┬─────────────┘              │
+                     │ ids  (1, L+2)              │
+                     │                            │
+   ┌─────────────────▼──────────────────┐         │
+   │ T3  (Llama-520M, 30 layers)        │◄────────┤ ve: 256-d speaker embedding
+   │  cond 34 + text L+2 + speech S+1   │◄────────┤ 150 S3 prompt tokens
+   └─────────────────┬──────────────────┘         │
+                     │ speech ids (S,) @ 25 Hz    │
+                     │                            │
+   ┌─────────────────▼──────────────────┐         │
+   │ S3Gen.tokenizer  : wav -&gt; 6561     │         │
+   │ S3Token2Mel      : ids -&gt; 80-d mel │◄────────┘ s3gen.embed_ref: prompt_feat (80-d mel),
+   │ CFM (Euler, 10 steps)              │            192-d CAMPPlus x-vector, prompt_token
+   └─────────────────┬──────────────────┘
+                     │ mel (80, 50 fps)
+   ┌─────────────────▼──────────────────┐
+   │ HiFTGenerator: mel -&gt; 24 kHz wav   │   (upsample 8x5x3 = 120)
+   └─────────────────┬──────────────────┘
+                     │
+              Perth watermarker (48 kHz, inaudible)
+                     │
+                 torch.FloatTensor (1, N) @ 24 kHz
+</code></pre>
+<p>Rate table — memorise this, every shape below follows from it:</p>
+<table>
+<thead>
+<tr>
+<th>quantity</th>
+<th>rate</th>
+<th>source</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>text ids</td>
+<td>1 id ≈ 1.35 chars (char BPE)</td>
+<td><code>grapheme_mtl_merged_expanded_v1.json</code></td>
+</tr>
+<tr>
+<td>S3 speech tokens</td>
+<td><strong>25 /s</strong> (40 ms each)</td>
+<td><code>S3_TOKEN_RATE = 25</code></td>
+</tr>
+<tr>
+<td>mel frames (s3gen)</td>
+<td><strong>50 /s</strong> (<code>n_fft 1920</code>, <code>hop 480</code> @ 24 kHz, 80 mels)</td>
+<td><code>utils/mel.py</code></td>
+</tr>
+<tr>
+<td>mel frames per token</td>
+<td><strong>2</strong> (<code>token_mel_ratio = 2</code>) -&gt; 25 Hz x 2 = 50 fps</td>
+<td><code>flow.py:52</code></td>
+</tr>
+<tr>
+<td>waveform</td>
+<td><strong>24 kHz</strong> = 50 fps x 120 x 4 (<code>istft hop_len = 4</code>)</td>
+<td><code>S3GEN_SR</code>, <code>hifigan.py</code></td>
+</tr>
+<tr>
+<td>T3 input audio</td>
+<td><strong>16 kHz</strong> (<code>ve</code>, S3 tokenizer)</td>
+<td><code>S3_SR = 16000</code></td>
+</tr>
+<tr>
+<td>reference window</td>
+<td><strong>6 s</strong> for T3, <strong>10 s</strong> for s3gen</td>
+<td><code>ENC_COND_LEN</code>, <code>DEC_COND_LEN</code></td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2>3. Stage A — text to token ids</h2>
+<p><code>MTLTokenizer</code> (<code>models/tokenizers/tokenizer.py</code>) is a HuggingFace <code>tokenizers</code>
+file: a <strong>BPE whose base symbols are individual characters</strong>, with no
+pre-tokenizer, no normalizer, no decoder configured.</p>
+<p><code>MTLTokenizer.encode</code> does, in order:</p>
+<ol>
+<li><code>lowercase=True</code>, <code>NFKD</code> normalisation (<code>preprocess_text</code>);</li>
+<li>language-specific preprocessing — only for <code>zh</code> (Cangjie), <code>ja</code> (kanji -&gt;
+hiragana), <code>he</code> (diacritics), <code>ko</code>, <code>ru</code> (stress marks). <strong>Swahili has none</strong>,
+so <code>sw</code> is a pure lowercase+NFKD path;</li>
+<li>prepend the literal language tag, <code>f&quot;[{language_id}]&quot;</code> -&gt; <code>&quot;[sw]&quot;</code>;</li>
+<li>replace every space with the literal token <code>[SPACE]</code>;</li>
+<li>BPE-encode.</li>
+</ol>
+<p>Vocabulary facts read from the file itself:</p>
+<table>
+<thead>
+<tr>
+<th>id</th>
+<th>token</th>
+<th>note</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>0</td>
+<td><code>[STOP]</code></td>
+<td>also <code>hp.stop_text_token</code> and the pad id</td>
+</tr>
+<tr>
+<td>1</td>
+<td><code>[UNK]</code></td>
+<td></td>
+</tr>
+<tr>
+<td>2</td>
+<td><code>[SPACE]</code></td>
+<td>stands in for <code>&quot; &quot;</code> (so no token is &quot;empty&quot;)</td>
+</tr>
+<tr>
+<td>255</td>
+<td><code>[START]</code></td>
+<td>also <code>hp.start_text_token</code></td>
+</tr>
+<tr>
+<td>730</td>
+<td><code>[sw]</code></td>
+<td>Swahili tag (<code>[en]</code> = 708)</td>
+</tr>
+<tr>
+<td>2453</td>
+<td><code>ạ</code></td>
+<td>last id -&gt; <code>text_tokens_dict_size = 2454</code></td>
+</tr>
+<tr>
+<td>—</td>
+<td><code>[laughter]</code>, <code>[sigh]</code>, <code>[inhale]</code>, <code>[whisper]</code>, <code>[gasp]</code>, <code>[guffaw]</code>, …</td>
+<td>118 <code>added_tokens</code>: language tags <strong>and non-verbal events</strong>; <code>[ipa]</code> switches the tokenizer into phoneme mode</td>
+</tr>
+</tbody>
+</table>
+<p>The English-only checkpoint uses the same architecture with a 704-entry
+character vocab (<code>T3Config.english_only()</code>); <code>T3Config.is_multilingual</code> is
+literally <code>text_tokens_dict_size == 2454</code>, and it only switches on the
+inference-time alignment hook (§5.3).</p>
+<h3>Worked example (ids read from the shipped vocab)</h3>
+<p>Input:</p>
+<pre><code>Sasa wewe, unajua vile mambo iko. Let me tell you, hii ni serious.
+</code></pre>
+<p>After lowercase + NFKD + tag + space replacement, the encoder emits 51 ids:</p>
+<pre><code>730 [sw]      32 s       55 as      14 a       2 [SPACE]  100 we     100 we
+  7 ,          2 [SPACE] 97 un     14 a      23 j        34 u       14 a
+  2 [SPACE]   35 v       22 i       64 le      2 [SPACE] 26 m      122 am
+165 bo         2 [SPACE] 22 i       24 k       28 o        9 .        2 [SPACE]
+ 64 le        33 t        2 [SPACE] 80 me      2 [SPACE] 136 te     84 ll
+  2 [SPACE]   74 you      7 ,        2 [SPACE] 21 h       22 i       22 i
+  2 [SPACE]   27 n       22 i        2 [SPACE] 32 s       44 er      22 i
+206 ous        9 .
+</code></pre>
+<p>Three things worth noticing:</p>
+<ul>
+<li><strong>Sheng is handled by the base vocabulary.</strong> <code>sasa</code>, <code>wewe</code>, <code>unajua</code>, <code>mambo</code>
+are spelled out of Latin character merges — the model does not need a new
+tokenizer entry to <em>say</em> them, only to <em>pronounce them in Sheng</em> (a T3 job).</li>
+<li><strong>English words cost more ids than Swahili</strong> (<code>serious</code> -&gt; <code>s er i ous</code>, four
+ids) because the merge table is English-ASCII-heavy; the tag tells the model
+which phonology to apply.</li>
+<li>51 text ids for 69 characters = <strong>1.35 chars/id</strong>; a 30 s clip transcript
+(≈450 chars) fits comfortably inside <code>max_text_tokens = 2048</code>.</li>
+</ul>
+<p>Then <code>mtl_tts.generate</code> wraps it exactly as the trainer does:</p>
+<pre><code class="language-python">text_tokens = tokenizer.text_to_tokens(text, language_id=&quot;sw&quot;)   # (1, 51)
+text_tokens = torch.cat([text_tokens, text_tokens], dim=0)       # (2, 51)  &lt;- CFG pair
+text_tokens = F.pad(text_tokens, (1, 0), value=255)              # prepend [START]
+text_tokens = F.pad(text_tokens, (0, 1), value=0)                # append  [STOP]
+# -&gt; (2, 53) int64
+</code></pre>
+<p>The <code>(2, …)</code> batch is not a bug: the second row is the <strong>classifier-free
+guidance unconditional branch</strong>. It is identical here, and gets zeroed later by
+<code>prepare_input_embeds</code> (<code>text_emb[1].zero_()</code>).</p>
+<hr />
+<h2>4. Stage B — T3: text tokens to speech tokens</h2>
+<p>T3 is <code>LlamaModel</code> with a custom embedding front-end, a custom conditioning
+prefix, and <strong>two</strong> output heads. It never sees token ids through Llama's own
+<code>embed_tokens</code>; the embeddings are injected as <code>inputs_embeds</code>.</p>
+<pre><code>T3
+├── tfmr            LlamaModel (LLAMA_520M)
+│     hidden 1024, 30 layers, 16 heads x head_dim 64, MLP 4096, SwiGLU
+│     RoPE theta 500000, llama3 rope_scaling factor 8
+│     vocab_size 8 -- unused, we bypass embed_tokens
+├── text_emb        Embedding(2454, 1024)
+├── speech_emb      Embedding(8194, 1024)      (6561 codes + specials, padded)
+├── text_pos_emb    LearnedPositionEmbeddings(2050, 1024)
+├── speech_pos_emb  LearnedPositionEmbeddings(4100, 1024)
+├── cond_enc        T3CondEnc   (speaker + prompt + emotion -&gt; prefix)
+├── text_head       Linear(1024 -&gt; 2454, no bias)
+└── speech_head     Linear(1024 -&gt; 8194, no bias)
+</code></pre>
+<p>Parameter count from those shapes: <code>30 x (attn 4x1024x1024 + mlp 3x1024x4096)</code>
+≈ 520 M in the transformer, plus <code>1.0 M + 8.4 M</code> in the two embedding tables,
+plus <code>2.5 M + 8.4 M</code> in the two heads, plus <code>0.26 M</code> in <code>cond_enc</code> → <strong>≈ 541 M</strong>
+including both tables (<code>~1 GB</code> in fp16, which is why a checkpoint dir is ~1 GB).</p>
+<h3>4.1 The conditioning prefix — <code>T3CondEnc</code></h3>
+<p>This is the only place &quot;who is speaking&quot; enters the LM. Three tensors, three
+different jobs, one concatenated prefix of <strong>34 positions</strong>:</p>
+<pre><code>T3Cond.speaker_emb                (B, 256)      ve output, mean over windows
+  └─ spkr_enc: Linear(256 -&gt; 1024)              -&gt; (B, 1, 1024)
+
+T3Cond.cond_prompt_speech_tokens  (B, 150)      first 6 s of the reference clip
+  └─ speech_emb(ids) + speech_pos_emb(0..149)   -&gt; (B, 150, 1024)
+  └─ perceiver (32 queries, 4 heads, 2 attn blocks) -&gt; (B, 32, 1024)
+
+T3Cond.emotion_adv                (B, 1, 1)     the &quot;exaggeration&quot; scalar, 0.5 default
+  └─ emotion_adv_fc: Linear(1 -&gt; 1024, no bias) -&gt; (B, 1, 1024)
+
+cond_emb = cat([spkr(1), clap(0), prompt(32), emotion(1)], dim=1)   -&gt; (B, 34, 1024)
+</code></pre>
+<p><code>Perceiver.forward</code> is <code>cross_attn(query(32), h(150))</code> followed by
+self-attention over the 32 latents: it is a <em>learned compression</em> of the
+reference clip's token stream, not a copy. This is why the T3 prompt is 150
+tokens but only costs 32 LM positions, and why a 6 s reference is enough —
+32 latents is all the acoustic context the LM ever gets.</p>
+<p><code>clap_emb</code> is reserved in the dataclass but asserted <code>None</code>; no CLAP conditioning
+ships in the released weights.</p>
+<h3>4.2 Sequence assembly — <code>prepare_input_embeds</code></h3>
+<pre><code>positions:   0 ...... 33 | 34 ............. 34+L+1 | 34+L+2 ..... 34+L+S+2
+content:     conditioned  | [START] text [STOP]     | [START] speech ... [STOP]
+             prefix (34)  | text, L+2 ids            | speech, S+2 ids
+embeddings:  cond_emb     | text_emb + text_pos_emb  | speech_emb + speech_pos_emb
+</code></pre>
+<p>Two independent position spaces on purpose: text positions always restart at 0,
+speech positions always restart at 0, and the prefix itself carries no positional
+component. That is what lets the same weights handle a 3-word prompt and a
+40 s paragraph — and it is what makes the <code>[START]</code>-of-speech hand-off stable.</p>
+<p>Shapes for inference (CFG batch of 2, 51 text ids, one initial speech token):</p>
+<pre><code>cond_emb             (2, 34, 1024)
+text_emb             (2, 53, 1024)     text row 1 zeroed for CFG
+speech_emb           (2,  1, 1024)     the [START] speech token (6561)
+embeds               (2, 88, 1024)     = 34 + 53 + 1
+bos_embed            (2,  1, 1024)     [START] again + speech_pos_emb(0)
+inputs_embeds        (2, 89, 1024)     &lt;- concatenated, §5.1 explains the duplicate
+</code></pre>
+<h3>4.3 Training forward pass</h3>
+<p><code>T3.forward</code> runs one causal pass over the whole concatenated sequence, then
+<strong>slices the hidden states back into two streams</strong> and applies each head:</p>
+<pre><code>hidden_states            (B, 34+L+2+S+2, 1024)
+text_latents   = hidden[:, 34        : 34+L+2]      (B, L+2, 1024) -&gt; text_head   -&gt; (B, L+2, 2454)
+speech_latents = hidden[:, 34+L+2    : 34+L+2+S+2]  (B, S+2, 1024) -&gt; speech_head -&gt; (B, S+2, 8194)
+</code></pre>
+<p><code>T3.loss</code> then computes <strong>two cross-entropies</strong>, one per stream, and returns them
+separately:</p>
+<pre><code class="language-python">loss_text   = F.cross_entropy(text_logits,   masked_text,   ignore_index=-100)
+loss_speech = F.cross_entropy(speech_logits, masked_speech, ignore_index=-100)
+return loss_text, loss_speech
+</code></pre>
+<p><code>train_t3.py</code> optimises the sum (<code>loss_text + loss_speech</code>). The text loss is a
+regulariser: it forces the LM to keep the spelling of the transcript recoverable
+in its own hidden states, which is what keeps text and speech aligned in a model
+that has no explicit duration predictor.</p>
+<blockquote>
+<p><strong>Important caveat — read before training.</strong> As shipped, this loss is <em>not</em>
+shifted, i.e. the state at position <code>p</code> is scored against the token at <code>p</code>.
+Generation scores the state at the last position against the <em>next</em> token
+(§5). The widely used community kit
+<a href="https://github.com/gokhaneraslan/chatterbox-finetuning"><code>gokhaneraslan/chatterbox-finetuning</code></a>
+implements the shifted variant (<code>speech_logits[:, :-1]</code> vs
+<code>speech_tokens[:, 1:]</code>) and also masks the reference-prompt region out of the
+speech labels. <code>docs/03-chatterbox-finetuning.md</code> gives the exact patch; the
+difference is <code>loss</code> moving from &quot;reconstruct&quot; to &quot;predict&quot;, and it shows up as
+runaway or repetitive generation after a long fine-tune.</p>
+</blockquote>
+<h3>4.4 Dual heads, one backbone</h3>
+<p>Having two heads over one backbone is what makes the same 520 M network both a
+text autoencoder and a speech generator:</p>
+<ul>
+<li><code>text_head</code> never runs at inference — it only exists to create the gradient
+signal that pins text content into the shared hidden states;</li>
+<li><code>speech_head</code> is the only thing sampled from at inference;</li>
+<li>both read the <em>same</em> final hidden states, so &quot;where am I in the text&quot; and
+&quot;what sound comes next&quot; are solved by one attention stack.</li>
+</ul>
+<hr />
+<h2>5. Stage B at inference — the autoregressive loop</h2>
+<p><code>T3.inference</code> (<code>models/t3/t3.py</code>, ~line 227) is a hand-written loop, not
+<code>generate()</code> (the <code>generate()</code> call is commented out in the source). It is worth
+reading in full because every quality knob lives here.</p>
+<h3>5.1 Why <code>inputs_embeds</code> twice</h3>
+<pre><code class="language-python">bos_token  = [[6561]]                     # start_speech_token
+bos_embed  = speech_emb(bos_token) + speech_pos_emb.get_fixed_embedding(0)
+inputs_embeds = cat([embeds, bos_embed], dim=1)   # embeds already ends with a speech token
+</code></pre>
+<p><code>embeds</code> ends with the <em>conditioning-start</em> speech position (from
+<code>prepare_input_embeds</code>), and one more BOS is appended so that the <strong>last hidden
+state is a pure &quot;speech continues here&quot; state</strong>. Logits at that position give the
+first real speech token. Generation is therefore always &quot;predict token at
+<code>len(inputs_embeds)</code>&quot;, which is exactly the position convention the trainer's
+learned <code>speech_pos_emb</code> was indexed against (<code>get_fixed_embedding(i+1)</code> for the
+<code>i</code>-th emitted token).</p>
+<h3>5.2 Guidance, warpers, and the alignment watchdog</h3>
+<p>Per step, in this exact order:</p>
+<pre><code>logits_step                     (2, 8194)         B=2: conditional + unconditional
+cond, uncond = logits_step[0], logits_step[1]
+logits = cond + cfg_weight * (cond - uncond)      (1, 8194)   default cfg_weight=0.5
+        │  alignment_stream_analyzer.step(logits, last_token)   see 5.3
+        │  RepetitionPenaltyLogitsProcessor(2.0)  [note: 2.0 &gt; typical 1.1]
+        │  temperature 0.8
+        │  MinPLogitsWarper(0.05), TopPLogitsWarper(1.0)
+        ▼
+probs = softmax(logits) -&gt; multinomial -&gt; next_token (1, 1)
+</code></pre>
+<p>Two details that surprise people:</p>
+<ul>
+<li><strong>CFG is over the whole prefix, not just the speaker.</strong> Row 1 of the batch has
+<code>text_emb[1].zero_()</code>, so the unconditional branch is &quot;same conditioning, no
+text&quot; — guidance sharpens text adherence, not timbre.</li>
+<li>The unconditional branch and the conditional branch share <code>cond_emb</code>
+(<code>cond_emb</code> is expanded from <code>(1, 34, 1024)</code> to <code>(2, 34, 1024)</code>), so guidance
+cannot drift the speaker away from the reference.</li>
+</ul>
+<h3>5.3 The multilingual integrity checker</h3>
+<p>For multilingual checkpoints only (<code>hp.is_multilingual</code>), <code>T3.inference</code> attaches
+<code>AlignmentStreamAnalyzer(tfmr, alignment_layer_idx=9, eos_idx=6562)</code>. It hooks
+attention on three <strong>hand-picked heads</strong> — <code>LLAMA_ALIGNED_HEADS = [(12,15), (13,11), (9,2)]</code>, i.e. layers 12/13/9, heads 15/11/2 — and averages them into an
+alignment matrix <code>A[t, s]</code> (speech frame x text token). From <code>A</code> it derives:</p>
+<table>
+<thead>
+<tr>
+<th>flag</th>
+<th>rule</th>
+<th>effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>false_start</code></td>
+<td>bottom-right activations or no strong early activation</td>
+<td>hold generation, do not commit the first frames (anti-hallucination at the start)</td>
+</tr>
+<tr>
+<td><code>complete</code></td>
+<td>argmax text position reaches <code>S-3</code></td>
+<td>generation has consumed the text</td>
+</tr>
+<tr>
+<td><code>long_tail</code></td>
+<td>final-3-token mass ≥ 5 frames &gt; 200 ms</td>
+<td>force <code>[STOP]</code> speech token 6562</td>
+</tr>
+<tr>
+<td><code>repetition</code></td>
+<td>activation returns to earlier text after completion</td>
+<td>force <code>[STOP]</code></td>
+</tr>
+<tr>
+<td><code>discontinuity</code></td>
+<td>text position jumps</td>
+<td>flag only</td>
+</tr>
+</tbody>
+</table>
+<p>This is the mechanism behind the empirical rule in <code>finetune-chatterbox</code>'s
+<code>EVAL_PROMPTS</code>: long texts &quot;degrade&quot; because the watchdog trips earlier, and
+runaway generation is cut at 1000 tokens (<code>max_new_tokens=1000</code> in <code>mtl_tts.py</code>).</p>
+<h3>5.4 Stop conditions</h3>
+<p>Generation ends on the first of:</p>
+<ol>
+<li>sampled <code>next_token == 6562</code> (<code>[STOP]</code> speech);</li>
+<li><code>max_new_tokens = 1000</code> (≈ 40 s of speech at 25 Hz);</li>
+<li>an alignment-watchdog override that forces <code>[STOP]</code>.</li>
+</ol>
+<h3>5.5 Clean-up before the vocoder</h3>
+<pre><code class="language-python">speech_tokens = speech_tokens[0]            # drop the CFG row
+speech_tokens = drop_invalid_tokens(speech_tokens)   # remove ids &gt;= 6561
+</code></pre>
+<p><code>drop_invalid_tokens</code> (<code>models/s3tokenizer/__init__.py</code>) is essential: T3's
+output vocabulary is 8194 (special tokens included), the vocoder's token
+embedding only has 6561+1 rows. Any id ≥ 6561 left in would index out of range in
+<code>flow.py</code> (<code>input_embedding</code>). The S3Gen forward path also has a defensive
+<code>.any()</code> check that logs <code>out-of-range special tokens found in flow, fix inputs!</code>.</p>
+<h3>5.6 Output of T3</h3>
+<pre><code>speech_tokens: (S,) int64 in [0, 6560]        # S = round(audio_seconds * 25)
+</code></pre>
+<p>Nothing else. No prosody vector, no durations, no pitch — those are all implicit
+in the token sequence and re-derived by S3Gen.</p>
+<hr />
+<h2>6. Stage C — S3Gen part 1: tokens to mel</h2>
+<p><code>S3Token2Mel</code> (<code>models/s3gen/s3gen.py</code>) is a CosyVoice-lineage pipeline. Three
+separate things come out of the reference clip before any token is processed.</p>
+<h3>6.1 <code>embed_ref</code> — the s3gen half of voice cloning</h3>
+<pre><code class="language-python">ref_24k  = librosa.load(wav, sr=24000)[:10 s]          # DEC_COND_LEN = 10 * 24000
+ref_16k  = resample(ref_24k, 24000 -&gt; 16000)           # and ref_16k[:6 s] for T3
+
+prompt_feat    = mel_extractor(ref_24k)                # (1, 80, T_ref)   @ 50 fps
+embedding      = CAMPPlus(ref_16k)                     # (1, 192)         x-vector
+prompt_token   = S3Tokenizer(ref_16k)                  # (1, 25*T_ref)    @ 25 Hz
+</code></pre>
+<p>and the rate contract is enforced on the spot:</p>
+<pre><code class="language-python">if ref_mels_24.shape[1] != 2 * ref_speech_tokens.shape[1]:
+    ref_speech_tokens = ref_speech_tokens[:, :ref_mels_24.shape[1] // 2]
+</code></pre>
+<p><code>prompt_feat</code> is the only tensor that survives into the CFM as <em>audio</em>; the
+x-vector is projected to 80-d and injected as a per-frame bias; <code>prompt_token</code>
+is replayed through the same encoder as the generated tokens so the encoder's
+receptive field &quot;warms up&quot; on the reference.</p>
+<h3>6.2 Token -&gt; encoder -&gt; mel-rate features</h3>
+<pre><code class="language-python">embedding = F.normalize(embedding); embedding = spk_embed_affine_layer(embedding)   # (1,192)-&gt;(1,80)
+token     = cat([prompt_token, generated_token], dim=1)        # (1, T_prompt + S)
+mask      = ~make_pad_mask(token_len).unsqueeze(-1)            # (1, T, 1)
+x         = input_embedding(token) * mask                      # (1, T, 512)
+h, h_masks = encoder(x, token_len)                             # UpsampleConformerEncoder
+h         = h[:, :-pre_lookahead_len * token_mel_ratio]         # causal trim, 3*2 = 6 frames
+h         = encoder_proj(h)                                    # (1, 2T, 80)   &lt;- x2 time upsample
+mu        = h.transpose(1, 2)                                  # (1, 80, 2T)
+conds     = zeros(1, 80, mel_len1 + mel_len2); conds[:, :mel_len1] = prompt_feat
+</code></pre>
+<p>The encoder (<code>UpsampleConformerEncoder</code>, 6 blocks, 512-d, 8 heads, rel-pos
+ESPNet style, <code>use_cnn_module=False</code>, <code>macaron_style=False</code>) contains the x2
+time upsampling internally, so <strong>one token in -&gt; two mel frames out</strong>, i.e.
+25 Hz -&gt; 50 fps. <code>encoder_proj</code> is <code>Linear(512 -&gt; 80)</code>.</p>
+<blockquote>
+<p>Rate note: the s3gen mel grid is <strong>50 fps</strong> (<code>n_fft=1920</code>, <code>hop_size=480</code>,
+<code>fmax=8000</code> at 24 kHz) — not 100 fps. Two frames per token is exactly the 40 ms
+duration of one S3 token. HiFT then multiplies the frame rate by
+<code>8 x 5 x 3 = 120</code> and each output frame expands to <code>istft hop_len = 4</code> samples:
+<code>50 * 120 * 4 = 24000</code> samples/s. (A sibling walkthrough in
+<code>voice-clone/docs/</code> quotes 100 fps / hop 240; the shipped defaults above are
+what the weights were trained with.)</p>
+</blockquote>
+<p>The two conditionings are now visible in one picture:</p>
+<pre><code>mu    (1, 80, 2*(T_prompt+S))    content: &quot;what is said&quot;        &lt;- tokens
+cond  (1, 80, 2*T_ref + 2*S)     texture: &quot;what the voice is&quot;   &lt;- reference mel, in front
+spks  (1, 80)                    identity: &quot;who&quot;                &lt;- CAMPPlus x-vector
+</code></pre>
+<h3>6.3 What the CFM actually solves</h3>
+<p><code>CausalConditionalCFM</code> is <strong>conditional flow matching</strong>, not a diffusion model:</p>
+<pre><code>x0 ~ N(0, I)                                  # (1, 80, T_mel)
+for t, r in zip(t_span[:-1], t_span[1:]):      # 10 steps, cosine schedule
+    dxdt = estimator(x, mask, mu, t, spks, cond)
+    x = x + (r - t) * dxdt
+</code></pre>
+<p>The estimator (<code>ConditionalDecoder</code>, causal conv + transformer hybrid) receives
+<code>in_channels=320 = 80 (x) + 80 (mu) + 80 (spks broadcast) + 80 (cond mel)</code>, plus
+a timestep embedding, and predicts an 80-d velocity per frame. <code>n_blocks=4</code>,
+<code>num_mid_blocks=12</code>, <code>channels=[256]</code>, 8 heads, <code>gelu</code>, <code>pre_lookahead_len=3</code>.</p>
+<p>Guidance in this half is <strong>speaker-only</strong>, and it is implemented by literally
+zeroing <code>spks</code> for the mirrored batch half:</p>
+<pre><code class="language-python">x_in[:B] = x_in[B:] = x        # same noise
+mu_in[:B] = mu                 # conditional branch gets content
+spks_in[:B] = spks             # unconditional branch gets zeros
+cond_in[:B] = cond             # reference mel in both halves
+...
+dxdt = (1 + 0.7) * dxdt_cond - 0.7 * dxdt_uncond     # inference_cfg_rate = 0.7
+</code></pre>
+<p><code>CFM_PARAMS</code>: <code>sigma_min 1e-6</code>, <code>solver euler</code>, <code>t_scheduler cosine</code>,
+<code>training_cfg_rate 0.2</code>, <code>inference_cfg_rate 0.7</code>, <code>n_timesteps 10</code>
+(<code>2</code> in the <code>meanflow</code> variants, which is what <code>tts_turbo.py</code> uses).</p>
+<p>Finally the prompt frames are cut back off:</p>
+<pre><code class="language-python">feat = feat[:, :, mel_len1:]        # keep only the generated region
+assert feat.shape[2] == mel_len2
+</code></pre>
+<hr />
+<h2>7. Stage D — mel to 24 kHz waveform (HiFT)</h2>
+<p><code>HiFTGenerator</code> (<code>models/s3gen/hifigan.py</code>) is a HiFi-GAN with a pitch source.</p>
+<pre><code>mel (1, 80, T) @ 50 fps
+ ├── ConvRNNF0Predictor -&gt; F0 (1, T)  -&gt;  sine source at harmonic frequencies,
+ │                                      upsampled by prod(upsample_rates) * hop_len = 480
+ └── upsample_rates [8, 5, 3] = x120  -&gt;  50 * 120 = 6000 frames/s
+      followed by 3 fused ResBlock banks (kernel 3/7/11, dilations 1/3/5)
+      + source fusion -&gt; final conv -&gt; torch.istft(n_fft=16, hop_len=4)
+      -&gt; 6000 * 4 = 24000 samples/s -&gt; waveform (1, N)
+</code></pre>
+<p>The F0 predictor is what makes it HiFT rather than plain HiFi-GAN: the excitation
+is a harmonic source driven by predicted pitch, so a cloned voice keeps its
+natural pitch instead of a learned buzz. <code>n_fft=16, hop=4</code> for the F0 branch
+(<code>istft_params</code>), <code>num_kernels = 3</code>.</p>
+<p>Then, before returning, <code>S3Gen.inference</code> applies the anti-spillover fade:</p>
+<pre><code class="language-python">output_wavs[:, :len(trim_fade)] *= trim_fade     # 20 ms cosine fade-in
+</code></pre>
+<p>That is a deliberate, documented hack: the first syllable of the reference clip
+otherwise bleeds into the output. It is also why an over-short reference clip
+sounds like the clone &quot;starts mid-word&quot; — the fade eats the onset.</p>
+<hr />
+<h2>8. Stage E — watermarking</h2>
+<p><code>ChatterboxMultilingualTTS.__init__</code> constructs
+<code>perth.PerthImplicitWatermarker()</code> and <code>generate</code> always applies it:</p>
+<pre><code class="language-python">wav = wav.squeeze(0).float().numpy()                  # 24 kHz
+watermarked = watermarker.apply_watermark(wav, sample_rate=self.sr)
+return torch.from_numpy(watermarked).unsqueeze(0)      # (1, N) float32
+</code></pre>
+<p><code>perth</code> (Resemble's Perth neural watermarker) resamples internally to 48 kHz,
+embeds an imperceptible watermark, and returns the same length at the original
+rate. Consequences for this repo: <strong>exported voices are watermarked</strong>, and any
+audio-metric comparison must compare like with like (the baseline is watermarked
+too, so CER/speaker-similarity deltas stay meaningful).</p>
+<hr />
+<h2>9. One full trace, all shapes</h2>
+<p>Example sentence: <code>Sasa wewe, unajua vile mambo iko. Let me tell you, hii ni serious.</code>
+51 text ids, ≈2.9 s of audio -&gt; 72 S3 tokens. Reference clip: 6 s.</p>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>tensor</th>
+<th>shape</th>
+<th>dtype</th>
+<th>where</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>text ids</td>
+<td><code>(2, 53)</code></td>
+<td>int64</td>
+<td>after <code>[START]</code>/<code>[STOP]</code> + CFG duplicate</td>
+</tr>
+<tr>
+<td>2</td>
+<td>speaker_emb</td>
+<td><code>(1, 256)</code></td>
+<td>f32</td>
+<td><code>ve.embeds_from_wavs</code></td>
+</tr>
+<tr>
+<td>3</td>
+<td>cond_prompt_speech_tokens</td>
+<td><code>(1, 150)</code></td>
+<td>int64</td>
+<td>S3 tokens of first 6 s</td>
+</tr>
+<tr>
+<td>4</td>
+<td>emotion_adv</td>
+<td><code>(1, 1, 1)</code></td>
+<td>f32</td>
+<td><code>exaggeration = 0.5</code></td>
+</tr>
+<tr>
+<td>5</td>
+<td>cond_emb</td>
+<td><code>(1, 34, 1024)</code></td>
+<td>bf16</td>
+<td><code>T3CondEnc</code></td>
+</tr>
+<tr>
+<td>6</td>
+<td>text_emb</td>
+<td><code>(2, 53, 1024)</code></td>
+<td>bf16</td>
+<td>row 1 zeroed for CFG</td>
+</tr>
+<tr>
+<td>7</td>
+<td>speech_emb (BOS)</td>
+<td><code>(2, 1, 1024)</code></td>
+<td>bf16</td>
+<td><code>[START]</code> speech</td>
+</tr>
+<tr>
+<td>8</td>
+<td>inputs_embeds</td>
+<td><code>(2, 89, 1024)</code></td>
+<td>bf16</td>
+<td>first forward</td>
+</tr>
+<tr>
+<td>9</td>
+<td>logits (last pos)</td>
+<td><code>(2, 8194)</code></td>
+<td>f32</td>
+<td><code>speech_head</code></td>
+</tr>
+<tr>
+<td>10</td>
+<td>sampled token</td>
+<td><code>(1, 1)</code></td>
+<td>int64</td>
+<td>after CFG + penalties</td>
+</tr>
+<tr>
+<td>11</td>
+<td>KV cache per step</td>
+<td>30 layers x <code>(2, 16, T, 64)</code> K and V</td>
+<td>bf16</td>
+<td>grows by 1 position per token</td>
+</tr>
+<tr>
+<td>12</td>
+<td>speech_tokens</td>
+<td><code>(72,)</code></td>
+<td>int64</td>
+<td>after <code>drop_invalid_tokens</code></td>
+</tr>
+<tr>
+<td>13</td>
+<td>prompt_token</td>
+<td><code>(1, 150)</code></td>
+<td>int64</td>
+<td>6 s @ 25 Hz</td>
+</tr>
+<tr>
+<td>14</td>
+<td>flow token seq</td>
+<td><code>(1, 222)</code></td>
+<td>int64</td>
+<td>150 prompt + 72 generated</td>
+</tr>
+<tr>
+<td>15</td>
+<td>encoder out <code>h</code></td>
+<td><code>(1, 444, 512)</code></td>
+<td>bf16</td>
+<td>2 x (150 + 72) frames @ 50 fps</td>
+</tr>
+<tr>
+<td>16</td>
+<td><code>mu</code></td>
+<td><code>(1, 80, 444)</code></td>
+<td>bf16</td>
+<td>after <code>encoder_proj</code></td>
+</tr>
+<tr>
+<td>17</td>
+<td><code>cond</code></td>
+<td><code>(1, 80, 444)</code></td>
+<td>bf16</td>
+<td>first 300 frames = reference mel, rest zero</td>
+</tr>
+<tr>
+<td>18</td>
+<td>CFM batch</td>
+<td><code>(2, 80, 444)</code></td>
+<td>bf16</td>
+<td>CFG over speaker</td>
+</tr>
+<tr>
+<td>19</td>
+<td>generated mel</td>
+<td><code>(1, 80, 144)</code></td>
+<td>f32</td>
+<td>444 - 300 = 2 x 72 frames</td>
+</tr>
+<tr>
+<td>20</td>
+<td>waveform</td>
+<td><code>(1, 69 120)</code></td>
+<td>f32</td>
+<td>144 frames x 480 samples = 2.88 s</td>
+</tr>
+<tr>
+<td>21</td>
+<td>watermarked wav</td>
+<td><code>(1, 69 120)</code></td>
+<td>f32</td>
+<td>returned</td>
+</tr>
+</tbody>
+</table>
+<p>Note on row 17: <code>conds</code> is allocated for <code>mel_len1 + mel_len2</code> frames, where
+<code>mel_len1 = prompt_feat.shape[1]</code> — the reference mel <em>defines</em> the length of the
+conditioning block — and <code>mel_len2 = h.shape[1] - mel_len1</code>. A 6 s reference at
+50 fps gives 300 frames = 2 x 150 prompt tokens, which is exactly why
+<code>embed_ref</code> asserts <code>mel_len == 2 * token_len</code> and truncates the tokens if the
+reference was not padded to a 40 ms multiple.</p>
+<hr />
+<h2>10. Where the cost goes</h2>
+<p>For a ~3 s output on a Colab L4 (bf16):</p>
+<table>
+<thead>
+<tr>
+<th>stage</th>
+<th>calls</th>
+<th>share of wall time</th>
+<th>notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>T3 prefill (89 positions)</td>
+<td>1</td>
+<td>~2 %</td>
+<td>one 520 M pass</td>
+</tr>
+<tr>
+<td>T3 decode</td>
+<td>72</td>
+<td><strong>~55 %</strong></td>
+<td>one 520 M forward per token, KV-cached</td>
+</tr>
+<tr>
+<td>S3 encoder</td>
+<td>1</td>
+<td>~3 %</td>
+<td>6 conformer blocks over 444 frames</td>
+</tr>
+<tr>
+<td>CFM Euler</td>
+<td>10</td>
+<td><strong>~30 %</strong></td>
+<td>10 velocity-net calls</td>
+</tr>
+<tr>
+<td>HiFT</td>
+<td>1</td>
+<td>~10 %</td>
+<td>conv-heavy, x480 expansion</td>
+</tr>
+<tr>
+<td>Perth watermark</td>
+<td>1</td>
+<td>~2 %</td>
+<td>inside <code>generate</code></td>
+</tr>
+</tbody>
+</table>
+<p>Two levers that exist in the source but are not in the public API docs:</p>
+<ul>
+<li><code>s3gen.inference(..., n_cfm_timesteps=16)</code> buys mel quality without retraining;
+10 is the default, 2 is the <code>meanflow</code> (turbo) path;</li>
+<li>T3 decode is strictly per-token, so <strong>output length dominates latency</strong>; the
+reference costs a constant 34 prefix positions regardless of its length.</li>
+</ul>
+<p>Measured RTF for this project's evals is ~0.15-0.35 on an L4 with watermarking
+included (see the <code>rtf</code> field in <code>evals/&lt;run&gt;/eval.json</code>).</p>
+<hr />
+<h2>11. Invariants and what breaks where</h2>
+<p>These are the checks that make debugging tractable, and each maps onto a symptom
+the <code>voice-clone</code> scorer already labels:</p>
+<table>
+<thead>
+<tr>
+<th>invariant</th>
+<th>broken -&gt; symptom</th>
+<th>root cause</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>one <code>[START]</code> and one <code>[STOP]</code> in text ids</td>
+<td>assertion in <code>_ensure_BOT_EOT</code></td>
+<td>malformed prompt</td>
+</tr>
+<tr>
+<td>every speech id <code>&lt; 6561</code></td>
+<td><code>input_embedding</code> index error</td>
+<td>special tokens leaked past <code>drop_invalid_tokens</code></td>
+</tr>
+<tr>
+<td><code>mel_len == 2 * token_len</code></td>
+<td>warning, then silent truncation</td>
+<td>reference not padded to 40 ms multiples</td>
+</tr>
+<tr>
+<td>T3 emits 6562 before 1000 tokens</td>
+<td><code>runaway</code> (40 s of babble)</td>
+<td>over-trained / LR too high</td>
+</tr>
+<tr>
+<td>CFM does not collapse</td>
+<td><code>silent</code> (RMS &lt; 1e-3)</td>
+<td>wrong language id, mismatched T3</td>
+</tr>
+<tr>
+<td>F0 source sane</td>
+<td><code>clipping</code> (&gt;1 % of samples at full scale)</td>
+<td>degenerate token stream into the vocoder</td>
+</tr>
+<tr>
+<td>speaker x-vector present</td>
+<td><code>wrong-voice</code> (cosine &lt; 0.5)</td>
+<td>reference clip from the wrong speaker, or T3 overfit</td>
+</tr>
+</tbody>
+</table>
+<p>The architectural payoff: <code>silent</code>/<code>clipping</code> cannot be caused by a bad T3
+fine-tune (s3gen is frozen), and <code>runaway</code> cannot be caused by s3gen. That is
+precisely the premise of the measure-first design in <code>voice-clone</code>.</p>
+<hr />
+<h2>12. Mapping repo code to stages</h2>
+<table>
+<thead>
+<tr>
+<th>repo symbol</th>
+<th>stage</th>
+<th>file</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Featurizer.text_tokens</code></td>
+<td>A</td>
+<td><code>finetune-chatterbox/src/sheng_chatterbox/t3data.py</code></td>
+</tr>
+<tr>
+<td><code>Featurizer.speech_tokens</code> / <code>cond_tokens</code></td>
+<td>C (tokenizer only)</td>
+<td>same</td>
+</tr>
+<tr>
+<td><code>Featurizer.speaker_embedding</code></td>
+<td>B (<code>ve</code>)</td>
+<td>same</td>
+</tr>
+<tr>
+<td><code>T3Cond(...)</code> + <code>model.t3.loss</code></td>
+<td>B / training</td>
+<td><code>train_t3.py::batch_loss</code></td>
+</tr>
+<tr>
+<td><code>SpeechCollator</code></td>
+<td>B (padding + lens)</td>
+<td><code>t3data.py</code></td>
+</tr>
+<tr>
+<td><code>_generate</code></td>
+<td>A -&gt; E</td>
+<td><code>infer.py</code></td>
+</tr>
+<tr>
+<td><code>load_finetuned</code></td>
+<td>swaps only T3</td>
+<td><code>infer.py</code></td>
+</tr>
+<tr>
+<td><code>export</code></td>
+<td>copies base files, replaces T3</td>
+<td><code>infer.py</code></td>
+</tr>
+<tr>
+<td><code>evals.synthesize</code></td>
+<td>A -&gt; E + ASR judge</td>
+<td><code>voice-clone/src/sheng_voiceclone/evals.py</code></td>
+</tr>
+<tr>
+<td><code>s3gen-cfm-walkthrough.md</code></td>
+<td>C/D in more depth</td>
+<td><code>voice-clone/docs/</code></td>
+</tr>
+</tbody>
+</table>
+<p><code>export</code> is worth stressing: because the split is clean, packaging a fine-tune is
+&quot;copy <code>ve.pt</code>, <code>s3gen.pt</code>, the tokenizer JSON and <code>conds.pt</code>, then drop the new
+<code>t3_cfg.safetensors</code> next to them&quot;. No conversion, no merge, no custom loader:</p>
+<pre><code class="language-python">ChatterboxMultilingualTTS.from_local(dir, device, t3_model=&quot;t3_cfg.safetensors&quot;)
+</code></pre>
+<p>(<code>from_local</code> without <code>t3_model=</code> is the PyPI 0.1.7 signature and hard-codes
+<code>t3_mtl23ls_v2.safetensors</code>; master added the argument, which is why
+<code>sheng_chatterbox</code> pins the filename explicitly.)</p>
+<hr />
+<h2>13. Appendix: defaults that matter</h2>
+<pre><code class="language-python"># T3Config (multilingual)
+start_text_token   = 255      stop_text_token   = 0
+start_speech_token = 6561     stop_speech_token = 6562
+text_tokens_dict_size = 2454  speech_tokens_dict_size = 8194
+max_text_tokens = 2048        max_speech_tokens = 4096
+speech_cond_prompt_len = 150  speaker_embed_size = 256
+use_perceiver_resampler = True   emotion_adv = True   input_pos_emb = &quot;learned&quot;
+
+# generate() defaults (mtl_tts.py)
+exaggeration = 0.5   cfg_weight = 0.5   temperature = 0.8
+repetition_penalty = 2.0   min_p = 0.05   top_p = 1.0   max_new_tokens = 1000
+
+# S3Gen
+ENC_COND_LEN = 6 s @ 16 kHz      DEC_COND_LEN = 10 s @ 24 kHz
+S3_SR = 16000   S3GEN_SR = 24000   token_mel_ratio = 2
+n_cfm_timesteps = 10 (2 meanflow)   inference_cfg_rate = 0.7
+mel: n_fft 1920, hop 480, 80 mels, fmax 8000     -&gt; 50 fps
+HiFT: upsample [8, 5, 3] x istft hop 4 = x480
+</code></pre>
+</body></html>

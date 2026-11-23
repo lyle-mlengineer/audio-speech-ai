@@ -1,0 +1,584 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<title>How Voice Cloning Works in Chatterbox</title><style>
+@page { size: A4; margin: 16mm 15mm 18mm 15mm; }
+* { box-sizing: border-box; }
+html { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+body {
+  font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  font-size: 10.4pt; line-height: 1.52; color: #1a1a1a; margin: 0;
+  max-width: 100%;
+}
+h1 { font-size: 21pt; line-height: 1.2; margin: 0 0 4mm; color: #111;
+     border-bottom: 2.5pt solid #2d6cdf; padding-bottom: 3mm; page-break-before: auto; }
+h2 { font-size: 14.5pt; margin: 9mm 0 2mm; color: #14304f; page-break-after: avoid;
+     border-left: 3.5pt solid #2d6cdf; padding-left: 3mm; }
+h3 { font-size: 11.6pt; margin: 6mm 0 1.5mm; color: #1d4470; page-break-after: avoid; }
+h4 { font-size: 10.4pt; margin: 4mm 0 1mm; color: #333; page-break-after: avoid; }
+p { margin: 0 0 2.4mm; }
+ul, ol { margin: 0 0 2.6mm 5mm; padding-left: 3mm; }
+li { margin: 0.8mm 0; }
+li > p { margin: 0.5mm 0; }
+code {
+  font-family: "Cascadia Mono", Consolas, "Courier New", monospace;
+  font-size: 8.6pt; background: #f2f4f7; padding: 0.3mm 1.1mm;
+  border-radius: 1.5pt; color: #b3005f; word-break: break-word;
+}
+pre {
+  background: #f7f9fb; border: 0.5pt solid #dde3ea; border-left: 3pt solid #6f8fb8;
+  border-radius: 2pt; padding: 2.5mm 3mm; margin: 2mm 0 3mm; overflow-wrap: normal;
+  page-break-inside: avoid; white-space: pre-wrap;
+}
+pre code {
+  background: none; padding: 0; color: #16324f; font-size: 8.35pt; line-height: 1.38;
+  word-break: normal;
+}
+blockquote {
+  margin: 2.5mm 0; padding: 2mm 3mm; background: #fff8e6;
+  border-left: 3pt solid #e0a800; color: #4a3b00; page-break-inside: avoid;
+}
+blockquote p:last-child { margin-bottom: 0; }
+table {
+  border-collapse: collapse; width: 100%; margin: 2mm 0 4mm; font-size: 9.05pt;
+  page-break-inside: auto;
+}
+thead { display: table-header-group; }
+tr { page-break-inside: avoid; }
+th {
+  background: #eaf0f9; text-align: left; padding: 1.4mm 1.8mm;
+  border: 0.5pt solid #c3cfdd; font-weight: 600; color: #16324f;
+}
+td { padding: 1.3mm 1.8mm; border: 0.5pt solid #d7dee7; vertical-align: top; }
+tbody tr:nth-child(even) td { background: #fafbfd; }
+td code, th code { font-size: 8.1pt; }
+hr { border: none; border-top: 0.6pt solid #ccd4de; margin: 7mm 0; }
+a { color: #1c5bb8; text-decoration: none; }
+.docmeta {
+  font-size: 8.6pt; color: #5b6b7d; margin: 0 0 7mm; letter-spacing: 0.2pt;
+}
+h1 + .docmeta { margin-top: 2mm; }
+strong { color: #0d2b45; }
+</style></head>
+<body><h1>How Voice Cloning Works in Chatterbox</h1>
+<p>Chatterbox clones a voice <strong>zero-shot, with no gradient steps</strong>: you give it 6-10
+seconds of reference audio and it speaks your text in that voice. This document
+explains the mechanism precisely — which tensors are extracted from the reference,
+where each one enters the network, which knobs actually control identity, and how
+to tell a good clone from a broken one.</p>
+<p>It is the &quot;how it works&quot; companion to <code>voice-clone/README.md</code> (the operational
+runbook) and to <code>01-chatterbox-multilingual-architecture.md</code> (the full tensor map).</p>
+<hr />
+<h2>1. The one-sentence version</h2>
+<blockquote>
+<p>Three independent conditionings are extracted from the reference clip — a
+256-d voice vector for the LM, 150 speech tokens compressed to 32 latents for
+in-context prosody, and a mel + 192-d x-vector for the flow-matching decoder —
+and generation is then conditioned on all three during sampling. Nothing is
+trained, so the reference <em>is</em> the model state for that utterance.</p>
+</blockquote>
+<hr />
+<h2>2. The entry point</h2>
+<pre><code class="language-python">model = ChatterboxMultilingualTTS.from_pretrained(device=&quot;cuda&quot;)
+model.prepare_conditionals(&quot;ref.wav&quot;, exaggeration=0.5)      # 1. clone
+wav = model.generate(&quot;Sasa wewe, unajua vile mambo iko.&quot;,     # 2. speak
+                     language_id=&quot;sw&quot;, exaggeration=0.5,
+                     cfg_weight=0.5, temperature=0.8,
+                     repetition_penalty=2.0, min_p=0.05, top_p=1.0)
+</code></pre>
+<p><code>generate(..., audio_prompt_path=&quot;ref.wav&quot;)</code> is the same thing with the two calls
+fused. <code>prepare_conditionals</code> is where all cloning happens — it fills
+<code>model.conds</code>, a <code>Conditionals(t3: T3Cond, gen: dict)</code> object, and every later
+call reuses it. <code>conds.pt</code> in the released repo is simply <em>a saved instance of
+this object</em> for Resemble's built-in voice, which is why the model can speak
+without you supplying a reference.</p>
+<p>Internally:</p>
+<pre><code>prepare_conditionals(wav_fpath, exaggeration=0.5)
+├── librosa.load(wav, sr=24000)                        -&gt; s3gen_ref_wav
+├── librosa.resample(-&gt; 16000)                         -&gt; ref_16k_wav
+├── s3gen_ref_wav = s3gen_ref_wav[:10 s]               DEC_COND_LEN
+├── s3gen.embed_ref(s3gen_ref_wav, 24000)              -&gt; gen dict (§3.2-3.4)
+├── s3gen.tokenizer(ref_16k_wav[:6 s], max_len=150)    -&gt; t3_cond_prompt_tokens
+├── ve.embeds_from_wavs([ref_16k_wav])                 -&gt; t3_cond.speaker_emb
+└── model.conds = Conditionals(T3Cond(...), ref_dict)
+</code></pre>
+<p>Everything is deterministic and cheap (no LM forward), which is why the reference
+can be swapped per request in a server without reloading 2 GB of weights.</p>
+<hr />
+<h2>3. The five tensors extracted from the reference</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>tensor</th>
+<th>extracted from</th>
+<th>shape</th>
+<th>consumed by</th>
+<th>role</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td><code>speaker_emb</code></td>
+<td>16 kHz, <code>ve</code> (GE2E)</td>
+<td><code>(1, 256)</code></td>
+<td><code>T3CondEnc.spkr_enc</code> -&gt; <code>(1, 1024)</code> prefix position 0</td>
+<td>&quot;who&quot; at the semantic level</td>
+</tr>
+<tr>
+<td>2</td>
+<td><code>cond_prompt_speech_tokens</code></td>
+<td>16 kHz first 6 s -&gt; S3 tokenizer</td>
+<td><code>(1, 150)</code></td>
+<td><code>speech_emb</code> + <code>Perceiver</code> -&gt; <code>(1, 32, 1024)</code> prefix positions 2..33</td>
+<td>&quot;how this speaker talks&quot; in-context</td>
+</tr>
+<tr>
+<td>3</td>
+<td><code>emotion_adv</code></td>
+<td>the <code>exaggeration</code> argument</td>
+<td><code>(1, 1, 1)</code></td>
+<td><code>emotion_adv_fc</code> -&gt; <code>(1, 1024)</code> prefix position 34</td>
+<td>intensity knob</td>
+</tr>
+<tr>
+<td>4</td>
+<td><code>prompt_feat</code></td>
+<td>24 kHz first 10 s -&gt; 80-band mel @ 50 fps</td>
+<td><code>(1, 80, 2*150)</code></td>
+<td>CFM <code>cond</code> (prepended frames)</td>
+<td>acoustic texture the decoder continues</td>
+</tr>
+<tr>
+<td>5</td>
+<td><code>embedding</code></td>
+<td>16 kHz, CAMPPlus x-vector</td>
+<td><code>(1, 192)</code></td>
+<td><code>spk_embed_affine_layer</code> -&gt; <code>(1, 80)</code>, CFM <code>spks</code></td>
+<td>&quot;who&quot; at the waveform level</td>
+</tr>
+<tr>
+<td>—</td>
+<td><code>prompt_token</code></td>
+<td>16 kHz -&gt; S3 tokenizer</td>
+<td><code>(1, 150)</code></td>
+<td><code>S3Token2Mel.encoder</code> prefix</td>
+<td>warms the conformer's receptive field</td>
+</tr>
+</tbody>
+</table>
+<p>Two facts follow immediately from this table and explain most cloning behaviour:</p>
+<ul>
+<li><strong>T3 never sees the reference audio, only 32 latents and a 256-d vector.</strong> It
+cannot copy the reference's waveform, only its statistics — so a cloned clip can
+sound like the speaker without being a resynthesis of the prompt.</li>
+<li><strong>S3Gen sees the reference <em>mel</em> directly.</strong> That is what makes the output
+inherit channel characteristics (mic, room, codec) as well as voice. A noisy
+reference gives a noisy clone; a reference with music gives a clone with music.</li>
+</ul>
+<h3>3.1 Why two different speaker embeddings</h3>
+<table>
+<thead>
+<tr>
+<th>embedding</th>
+<th>dim</th>
+<th>rate</th>
+<th>consumer</th>
+<th>property</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ve</code> (Resemblyzer/GE2E)</td>
+<td>256</td>
+<td>16 kHz</td>
+<td>T3 conditioner</td>
+<td>trained for speaker discrimination, robust to content</td>
+</tr>
+<tr>
+<td>CAMPPlus x-vector</td>
+<td>192</td>
+<td>16 kHz</td>
+<td>s3gen flow</td>
+<td>trained jointly with the vocoder, captures timbre+channel</td>
+</tr>
+</tbody>
+</table>
+<p>They are not interchangeable and not comparable numerically. <code>voice-clone</code>'s scorer
+uses a <strong>third</strong> space (SpeechBrain ECAPA) precisely so that measuring the clone
+does not use the same encoder the model was conditioned with.</p>
+<h3>3.2 Rate contract for the reference</h3>
+<pre><code>prompt_feat  : 6 s @ 24 kHz -&gt; 300 mel frames @ 50 fps   (hop 480, n_fft 1920, fmax 8 kHz)
+prompt_token : 6 s @ 16 kHz -&gt; 150 tokens @ 25 Hz        (40 ms each)
+2 * 150 = 300 mel frames                                 &lt;- the contract
+</code></pre>
+<p><code>embed_ref</code> enforces <code>mel_len == 2 * token_len</code> and truncates the tokens if the
+reference was not padded to a 40 ms multiple. If your reference is, say, 6.02 s,
+you get a one-line warning and a slightly truncated prompt — harmless, but it is
+why <code>voice-clone</code>'s resampler writes exact-length WAVs.</p>
+<h3>3.3 The 6 s / 10 s split</h3>
+<pre><code class="language-python">ENC_COND_LEN = 6 * S3_SR      # 96000 samples  -&gt; T3 prompt tokens
+DEC_COND_LEN = 10 * S3GEN_SR  # 240000 samples -&gt; s3gen mel + x-vector
+</code></pre>
+<p>The two halves of the model want different amounts of context, and the caps are
+independent:</p>
+<ul>
+<li>the LM only pays a fixed <strong>34 prefix positions</strong> no matter how long the prompt
+is (32 latents from the perceiver), so a longer T3 prompt mostly adds resolution
+to those latents, not sequence length;</li>
+<li>s3gen's cost grows with <code>prompt_feat</code> frames (they are part of the CFM's
+conditioning length), so &gt;10 s is simply dropped.</li>
+</ul>
+<p>Practical consequence: <strong>6 s is the useful minimum, 10 s the useful maximum</strong>, and
+everything past 10 s is silently ignored. <code>prepare_conditionals</code> emits
+<code>WARNING: s3gen received ref longer than 10s</code> for a reason.</p>
+<h3>3.4 Non-obvious detail: <code>ve</code> averages windows</h3>
+<pre><code class="language-python">ve_embed = torch.from_numpy(self.ve.embeds_from_wavs([ref_16k_wav], sample_rate=S3_SR))
+ve_embed = ve_embed.mean(axis=0, keepdim=True)     # (1, 256)
+</code></pre>
+<p><code>embeds_from_wavs</code> produces one embedding per ~1.6 s window; <code>prepare_conditionals</code>
+averages them. A reference that contains two speakers therefore yields the
+<em>average</em> voice — a classic silent failure (the clone sounds like neither). Use one
+speaker, no overlapping speech, no music.</p>
+<hr />
+<h2>4. Where the conditionings enter the network</h2>
+<pre><code>                          ref.wav
+              ┌───────────────┼────────────────────┐
+        16 kHz│         16 kHz│              24 kHz│
+              ▼               ▼                    ▼
+        ve -&gt; (256)   S3 tokzr -&gt; (150)      mel -&gt; (80, 300)
+              │               │                    │
+       spkr_enc(1024)   perceiver(32x1024)    prompt_feat
+              │               │                    │
+              └──── T3 prefix (34 positions) ──────┤
+                              │                    │
+                        text tokens                │
+                              ▼                    │
+                      [ T3 samples speech tokens ] │
+                              │                    │
+                              ▼                    ▼
+                      S3 tokens ──► conformer ──► CFM &lt;── x-vector (192) -&gt; (80)
+                                                  │
+                                             HiFT -&gt; 24 kHz
+</code></pre>
+<p>Read it as three nested levels of &quot;sameness&quot;:</p>
+<ol>
+<li><strong>T3, prefix level</strong>: the LM is told &quot;this is the speaker and how they speak&quot;
+before it sees any text. Nothing in the prompt is copied into the output —
+the prompt is <em>context</em>, and the LM's job is to continue in the same style.</li>
+<li><strong>CFM, conditioning level</strong>: the decoder is given the reference mel as the
+past it is expected to continue (<code>conds[:, :mel_len1] = prompt_feat</code>), and the
+x-vector as a global timbre bias.</li>
+<li><strong>Guidance, amplification level</strong>: both halves use classifier-free guidance to
+push toward the conditioned answer (text guidance in T3, speaker guidance in
+the CFM).</li>
+</ol>
+<h3>4.1 Why in-context conditioning works for speech</h3>
+<p>The 150 prompt tokens are embedded into the <em>same</em> space as the tokens T3 is about
+to emit, and placed immediately before the text block. To the attention stack this
+looks like &quot;a recording in this voice, then a transcript, then more of the same
+recording&quot;. Because the LM was trained with exactly this layout (prompt -&gt; text -&gt;
+continuation), voice cloning is a <em>sequence continuation</em> problem rather than a
+speaker-adaptation problem. That is why 6 seconds suffice and why the model needs
+no speaker embeddings at all — the prompt <em>is</em> the embedding, compressed 150 -&gt; 32
+by the perceiver so that it stays cheap.</p>
+<h3>4.2 The two guidances are not the same knob</h3>
+<table>
+<thead>
+<tr>
+<th>guidance</th>
+<th>where</th>
+<th>applies to</th>
+<th>default</th>
+<th>effect of raising</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>cfg_weight</code></td>
+<td><code>T3.inference</code></td>
+<td>text conditioning (row 1 has <code>text_emb</code> zeroed)</td>
+<td>0.5</td>
+<td>text adherence up, prosody flatter, more brittle</td>
+</tr>
+<tr>
+<td><code>inference_cfg_rate</code></td>
+<td><code>flow_matching.solve_euler</code></td>
+<td>speaker (row 2 has <code>spks</code> zeroed)</td>
+<td>0.7 (fixed in code)</td>
+<td>stronger reference identity, more reference <em>leakage</em>, brittle prosody</td>
+</tr>
+</tbody>
+</table>
+<p>Only <code>cfg_weight</code> is exposed by the public API. The 0.7 in the vocoder is a
+constant; if you want to change it you must patch <code>CFM_PARAMS</code>.</p>
+<hr />
+<h2>5. Doing it well: reference clip rules</h2>
+<p>The clone is a function of the reference, so the reference <strong>is</strong> the product
+specification. Rules that follow from §3:</p>
+<table>
+<thead>
+<tr>
+<th>rule</th>
+<th>why</th>
+<th>symptom if broken</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>6-10 s, single speaker, no overlap</td>
+<td><code>ve</code> averages windows; <code>prompt_feat</code> is 10 s max</td>
+<td>clone sounds like an average of people</td>
+</tr>
+<tr>
+<td>the <em>same</em> language/accent as the target text</td>
+<td>prompt tokens carry phonology into the LM</td>
+<td>Swahili prompt + English text = accent bleed</td>
+</tr>
+<tr>
+<td>clean, dry, no music</td>
+<td><code>prompt_feat</code> is used as CFM conditioning</td>
+<td>music or room tone in the output</td>
+</tr>
+<tr>
+<td>consistent recording channel with the desired output</td>
+<td>24 kHz mel carries channel</td>
+<td>clone sounds like a phone call when you wanted studio</td>
+</tr>
+<tr>
+<td>no clipping, no long silences</td>
+<td>S3 tokenizer emits silence tokens</td>
+<td>fade-in eats the first word, odd pacing</td>
+</tr>
+<tr>
+<td><code>exaggeration</code> consistent between conditioning and generation</td>
+<td>it is a conditioning input, not a sampler knob</td>
+<td>voice shifts mid-session</td>
+</tr>
+</tbody>
+</table>
+<p>The repository encodes two of these in code:</p>
+<ul>
+<li><code>voice-clone/dataset.py::pick_reference</code> picks the <strong>longest validation clip</strong> —
+longest (most speaker in one file) and never trained on (no leakage into the
+fine-tune);</li>
+<li><code>data</code> stage writes the reference's transcript to <code>ref_text.txt</code> next to
+<code>ref_audio.wav</code>, so the eval harness can compare against what the speaker
+actually said.</li>
+</ul>
+<h3>5.1 Reference leakage, and why it is the interesting failure</h3>
+<p>Because the CFM is conditioned on the reference mel <em>as preceding audio</em>, an
+over-strong speaker guidance or a very short reference makes the output start as a
+continuation of the prompt: you hear the prompt's last syllable, or the same
+intonation contour every time, or the pitch of the prompt's first word. Two
+mechanical guards exist:</p>
+<ul>
+<li><code>S3Gen</code> applies a <strong>20 ms cosine fade-in</strong> to every output
+(<code>output_wavs[:, :len(trim_fade)] *= trim_fade</code>) explicitly to suppress
+&quot;spillover&quot; from the reference clip;</li>
+<li><code>AlignmentStreamAnalyzer.false_start</code> delays committing the first speech frames
+when attention activations look off-diagonal (i.e. the model is &quot;reading&quot; the
+prompt instead of the text).</li>
+</ul>
+<p>If you still hear leakage: shorten the reference to 6 s, lower <code>cfg_weight</code>, or
+raise <code>n_cfm_timesteps</code> (10 -&gt; 16) to give the CFM more integration steps.</p>
+<hr />
+<h2>6. Sampling knobs, with the actual defaults</h2>
+<p><code>ChatterboxMultilingualTTS.generate</code> -&gt; <code>T3.inference</code>:</p>
+<pre><code class="language-python">temperature         = 0.8      # scale before warpers
+cfg_weight          = 0.5      # text CFG (0 = ignore text guidance branch)
+repetition_penalty  = 2.0      # note: high; 1.1-1.2 is the usual range
+min_p               = 0.05     # drop tokens below 5% of the top probability
+top_p               = 1.0      # effectively off by default
+max_new_tokens      = 1000     # hard cap ~40 s of speech
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>knob</th>
+<th>raise it</th>
+<th>lower it</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>temperature</code></td>
+<td>more variety, more word errors</td>
+<td>flatter, more robotic, more reliable</td>
+</tr>
+<tr>
+<td><code>cfg_weight</code></td>
+<td>follows the text harder, more monotone</td>
+<td>looser, more expressive, may drift from text</td>
+</tr>
+<tr>
+<td><code>repetition_penalty</code></td>
+<td>fewer loops, more clipped/short</td>
+<td>loops and stutter return</td>
+</tr>
+<tr>
+<td><code>min_p</code></td>
+<td>safe but bland</td>
+<td>more variety, more chance of invalid tokens</td>
+</tr>
+<tr>
+<td><code>n_cfm_timesteps</code></td>
+<td>cleaner mel, slower</td>
+<td>artefacts, faster</td>
+</tr>
+</tbody>
+</table>
+<p><code>repetition_penalty=2.0</code> is aggressive for an LM but appropriate here: T3 outputs
+40 ms tokens, and without it, repeated tokens produce audible stutter.</p>
+<hr />
+<h2>7. Evaluating a clone (what each number can and cannot tell you)</h2>
+<p>A cloned clip fails in exactly three ways, and only one is a training problem:</p>
+<table>
+<thead>
+<tr>
+<th>failure</th>
+<th>measurable signal</th>
+<th>tool</th>
+<th>fixed by</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>broken audio (silence, clipping, runaway)</td>
+<td>RMS &lt; 1e-3, &gt;1 % samples at full scale, duration &gt;&gt; expectation</td>
+<td>waveform only, no model</td>
+<td>inference params, checkpoint choice</td>
+</tr>
+<tr>
+<td>wrong words</td>
+<td>CER/WER vs the prompt (ASR judge)</td>
+<td><code>openai/whisper-small</code> in <code>voice-clone</code></td>
+<td>fewer steps / lower LR</td>
+</tr>
+<tr>
+<td>wrong voice</td>
+<td>cosine of ECAPA embeddings vs the reference clip</td>
+<td><code>speechbrain/spkrec-ecapa-voxceleb</code></td>
+<td>better reference, better fine-tune, more guidance</td>
+</tr>
+</tbody>
+</table>
+<p><code>voice-clone/metrics.py</code> thresholds these: <code>SILENT_RMS = 1e-3</code>,
+<code>CLIP_FRAC = 0.01</code>, <code>CER_BAD = 0.60</code> / <code>CER_GOOD = 0.35</code>,
+<code>SIM_BAD = 0.50</code> / <code>SIM_GOOD = 0.65</code>. The verdict (<code>KEEP</code> / <code>MIXED</code> / <code>REJECT</code> /
+<code>NO GAIN</code>) requires <em>both</em> directions to agree; <code>MIXED</code> is the honest normal case
+for 20 minutes of data.</p>
+<p>Two traps:</p>
+<ul>
+<li><strong>Do not mix embedding spaces.</strong> <code>ve</code> (256-d, used by T3), CAMPPlus (192-d,
+used by s3gen) and ECAPA (192-d, used to score) are three different metrics. A
+clone can be &quot;close&quot; in one and not another, and a cosine of 0.7 in ECAPA means
+something different from 0.7 in <code>ve</code>.</li>
+<li><strong>Do not score against a clip that was trained on.</strong> That produces a great number
+and a bad model. The reference clip must come from <code>val</code>/<code>test</code>.</li>
+</ul>
+<p>For human evaluation, an ABX test with 10+ listeners on 7 prompts tells you more
+than any single automatic metric; the automatic numbers are for <em>ranking your own
+runs</em>, not for absolute quality claims.</p>
+<hr />
+<h2>8. Zero-shot vs fine-tuned cloning</h2>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>zero-shot (<code>prepare_conditionals</code> only)</th>
+<th>fine-tuned T3 (this repo)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>data</td>
+<td>6-10 s</td>
+<td>20 min - 5 h</td>
+</tr>
+<tr>
+<td>what it captures</td>
+<td>timbre, rough prosody, channel</td>
+<td>timbre + accent + code-switch delivery + speaking rate</td>
+</tr>
+<tr>
+<td>failure mode</td>
+<td>generic accent, mild drift</td>
+<td>memorisation, runaway, unstable prosody</td>
+</tr>
+<tr>
+<td>setup cost</td>
+<td>none</td>
+<td>1-3 h GPU</td>
+</tr>
+<tr>
+<td>typical use</td>
+<td>&quot;sound like this file&quot;</td>
+<td>&quot;sound like this speaker, in this dialect&quot;</td>
+</tr>
+</tbody>
+</table>
+<p>They compose: a fine-tuned T3 <strong>plus</strong> a fresh reference clip from the same
+speaker is the best of both, and it is what <code>voice-clone eval --ckpt</code> does — the
+checkpoint supplies the dialect, the prompt supplies the specific recording's
+timbre/channel.</p>
+<p>The risk of composing them is <strong>prompt-target correlation</strong>: in training,
+<code>cond_prompt_speech_tokens</code> are the first 6 s of the <em>same</em> clip being predicted.
+Train long enough and the model learns &quot;repeat what follows the prompt&quot;, which at
+inference means reciting a training clip. Mitigations, in order of cost:</p>
+<ol>
+<li>stop earlier (200 steps, not 600);</li>
+<li>use a held-out reference clip for eval and for any listening test;</li>
+<li>train with prompt dropout (replace the prompt with zeros 10-20 % of steps);</li>
+<li>use a prompt taken from a <em>different</em> clip of the same speaker during training
+(the cleanest fix, and what most cloning recipes do).</li>
+</ol>
+<hr />
+<h2>9. Rights, watermarking, and honest limits</h2>
+<ul>
+<li>Every output passes through <code>perth.PerthImplicitWatermarker</code> inside <code>generate</code>
+— cloned audio is watermarked whether or not you want it.</li>
+<li>The Sheng dataset (<code>lyle-mlengineer/kenyan-celebs</code>) is derived from third-party
+video; check rights before publishing an exported voice.</li>
+<li>Chatterbox is archived research (MIT, unmaintained since Aug 2026): weights are
+public forever, but no upstream fixes. Pin <code>chatterbox-tts</code> and keep the
+pretrained files in your artifact store.</li>
+<li>A 20-minute fine-tune is a <strong>voice</strong> adaptation, not a language course: new Sheng
+slang that the base model has never seen will still be mispronounced. Keep
+prompts within the dataset's register (Swahili orthography + English content
+words) and measure with prompts you never trained on.</li>
+</ul>
+<hr />
+<h2>10. Minimal working example, annotated</h2>
+<pre><code class="language-python">import torch, torchaudio
+from chatterbox.mtl_tts import ChatterboxMultilingualTTS
+
+model = ChatterboxMultilingualTTS.from_local(
+    &quot;pretrained/chatterbox&quot;, device=&quot;cuda&quot;, t3_model=&quot;t3_cfg.safetensors&quot;   # or the base file
+)
+
+# --- cloning: 1 forward-free call, fills model.conds ---
+model.prepare_conditionals(&quot;ref_audio.wav&quot;, exaggeration=0.5)
+#   model.conds.t3.speaker_emb                 (1, 256)
+#   model.conds.t3.cond_prompt_speech_tokens   (1, 150)
+#   model.conds.t3.emotion_adv                 (1, 1, 1)
+#   model.conds.gen[&quot;prompt_feat&quot;]             (1, 80, 300)
+#   model.conds.gen[&quot;embedding&quot;]               (1, 192)
+#   model.conds.gen[&quot;prompt_token&quot;]            (1, 150)
+
+torch.manual_seed(1337)                      # sampling is stochastic
+with torch.inference_mode():
+    wav = model.generate(
+        &quot;Sasa wewe, unajua vile mambo iko.&quot;,
+        language_id=&quot;sw&quot;,                    # [sw] = id 730, no preprocessing
+        exaggeration=0.5,                    # must match prepare_conditionals
+        cfg_weight=0.5, temperature=0.8,
+        repetition_penalty=2.0, min_p=0.05,
+    )                                        # (1, N) float32 @ 24 kHz, watermarked
+
+torchaudio.save(&quot;out.wav&quot;, wav.cpu(), model.sr)
+</code></pre>
+<p>To clone a <em>different</em> voice in the same process, call <code>prepare_conditionals</code>
+again — there is nothing else to reset. To go back to the built-in voice, reload
+<code>conds.pt</code> (or call <code>generate(audio_prompt_path=...)</code> with the reference).</p>
+</body></html>

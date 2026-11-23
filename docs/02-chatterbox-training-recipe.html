@@ -1,0 +1,578 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<title>How Chatterbox Was Trained — Upstream Pretraining and This Project&#x27;s Fine-Tune</title><style>
+@page { size: A4; margin: 16mm 15mm 18mm 15mm; }
+* { box-sizing: border-box; }
+html { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+body {
+  font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  font-size: 10.4pt; line-height: 1.52; color: #1a1a1a; margin: 0;
+  max-width: 100%;
+}
+h1 { font-size: 21pt; line-height: 1.2; margin: 0 0 4mm; color: #111;
+     border-bottom: 2.5pt solid #2d6cdf; padding-bottom: 3mm; page-break-before: auto; }
+h2 { font-size: 14.5pt; margin: 9mm 0 2mm; color: #14304f; page-break-after: avoid;
+     border-left: 3.5pt solid #2d6cdf; padding-left: 3mm; }
+h3 { font-size: 11.6pt; margin: 6mm 0 1.5mm; color: #1d4470; page-break-after: avoid; }
+h4 { font-size: 10.4pt; margin: 4mm 0 1mm; color: #333; page-break-after: avoid; }
+p { margin: 0 0 2.4mm; }
+ul, ol { margin: 0 0 2.6mm 5mm; padding-left: 3mm; }
+li { margin: 0.8mm 0; }
+li > p { margin: 0.5mm 0; }
+code {
+  font-family: "Cascadia Mono", Consolas, "Courier New", monospace;
+  font-size: 8.6pt; background: #f2f4f7; padding: 0.3mm 1.1mm;
+  border-radius: 1.5pt; color: #b3005f; word-break: break-word;
+}
+pre {
+  background: #f7f9fb; border: 0.5pt solid #dde3ea; border-left: 3pt solid #6f8fb8;
+  border-radius: 2pt; padding: 2.5mm 3mm; margin: 2mm 0 3mm; overflow-wrap: normal;
+  page-break-inside: avoid; white-space: pre-wrap;
+}
+pre code {
+  background: none; padding: 0; color: #16324f; font-size: 8.35pt; line-height: 1.38;
+  word-break: normal;
+}
+blockquote {
+  margin: 2.5mm 0; padding: 2mm 3mm; background: #fff8e6;
+  border-left: 3pt solid #e0a800; color: #4a3b00; page-break-inside: avoid;
+}
+blockquote p:last-child { margin-bottom: 0; }
+table {
+  border-collapse: collapse; width: 100%; margin: 2mm 0 4mm; font-size: 9.05pt;
+  page-break-inside: auto;
+}
+thead { display: table-header-group; }
+tr { page-break-inside: avoid; }
+th {
+  background: #eaf0f9; text-align: left; padding: 1.4mm 1.8mm;
+  border: 0.5pt solid #c3cfdd; font-weight: 600; color: #16324f;
+}
+td { padding: 1.3mm 1.8mm; border: 0.5pt solid #d7dee7; vertical-align: top; }
+tbody tr:nth-child(even) td { background: #fafbfd; }
+td code, th code { font-size: 8.1pt; }
+hr { border: none; border-top: 0.6pt solid #ccd4de; margin: 7mm 0; }
+a { color: #1c5bb8; text-decoration: none; }
+.docmeta {
+  font-size: 8.6pt; color: #5b6b7d; margin: 0 0 7mm; letter-spacing: 0.2pt;
+}
+h1 + .docmeta { margin-top: 2mm; }
+strong { color: #0d2b45; }
+</style></head>
+<body><h1>How Chatterbox Was Trained — Upstream Pretraining and This Project's Fine-Tune</h1>
+<p>Two different trainings get confused with each other:</p>
+<ol>
+<li><strong>Upstream pretraining</strong> of <code>ResembleAI/chatterbox</code> — 23 languages, the
+0.5 B T3 LM + S3Gen vocoder + voice encoder. Resemble AI's data and compute.
+No training script is published, so this part is reconstructed from the
+<em>shipped weights, configs and inference code</em>.</li>
+<li><strong>The fine-tune in this repository</strong> — <code>finetune-chatterbox</code> (<code>sheng_t3</code>),
+which trains only T3 on 21 minutes of Sheng. Everything here is verifiable
+line by line.</li>
+</ol>
+<p>Claims below are tagged: <strong>[verified]</strong> = read from shipped code/artifacts,
+<strong>[inferred]</strong> = a design deduction from how the code behaves, <strong>[unknown]</strong> =
+not determinable from the public repository. The tags matter: a training recipe
+built on guessed hyperparameters wastes GPU hours.</p>
+<hr />
+<h1>Part I — How the released model was (probably) trained</h1>
+<h2>1.1 What is actually observable</h2>
+<table>
+<thead>
+<tr>
+<th>artifact</th>
+<th>what it pins down</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>t3_mtl23ls_v2.safetensors</code></td>
+<td>30-layer Llama, hidden 1024, 16 heads x 64, MLP 4096, RoPE theta 5e5 with llama3 scaling x8; custom <code>text_emb</code> 2454, <code>speech_emb</code> 8194, learned absolute pos tables, two linear heads</td>
+</tr>
+<tr>
+<td><code>grapheme_mtl_merged_expanded_v1.json</code></td>
+<td>2454-id character-level BPE; 23 <code>[xx]</code> language tags; <strong>IPA phone token set</strong> (<code>ˈiː</code>, <code>tʃ</code>, <code>ɪŋ</code>, ...); <strong>non-verbal tags</strong> <code>[laughter] [sigh] [inhale] [gasp] [whisper] [guffaw] [cough] [shhh] [gibberish] ...</code> (118 added tokens)</td>
+</tr>
+<tr>
+<td><code>s3gen.pt</code></td>
+<td>S3 tokenizer (<code>speech_tokenizer_v2_25hz</code>, 6561 codes), CAMPPlus x-vector, 6-block UpsampleConformer, <code>ConditionalDecoder</code> (320-&gt;80, 12 mid blocks), HiFT with <code>[8,5,3]</code></td>
+</tr>
+<tr>
+<td><code>ve.pt</code></td>
+<td>Resemblyzer-lineage GE2E encoder, 256-d, 16 kHz</td>
+</tr>
+<tr>
+<td><code>conds.pt</code></td>
+<td>one shipped <code>Conditionals</code> object (T3Cond + s3gen ref_dict) — a built-in voice</td>
+</tr>
+<tr>
+<td>code</td>
+<td><code>T3.loss</code> (dual-stream CE), <code>CFM.compute_loss</code> (flow-matching MSE + 20 % conditioning dropout), <code>inference_cfg_rate = 0.7</code>, <code>AlignmentStreamAnalyzer</code> head indices</td>
+</tr>
+</tbody>
+</table>
+<p>Three of those are unusually informative:</p>
+<ul>
+<li><strong>IPA tokens in the text vocabulary</strong> mean the upstream data pipeline had a
+phoneme mode (<code>[ipa]</code> tag). Grapheme and phoneme training for the same
+utterance is a cheap way to teach pronunciation instead of spelling.</li>
+<li><strong>Non-verbal and singing tags</strong> mean the training audio was <em>not</em> clean
+single-speaker studio TTS: those tags exist because the data contained
+laughter, sighs, breaths and music. It is in-the-wild speech.</li>
+<li><strong><code>AlignmentStreamAnalyzer</code> hard-codes layers 12/13/9 and heads 15/11/2.</strong> Those
+heads were found by <em>inspecting a trained model</em> and seeing which ones encode
+monotonic text-speech alignment. So alignment is <strong>emergent</strong>, not supervised by
+an auxiliary loss in the released code. Any recipe that adds an explicit
+duration/alignment loss is a departure from the original.</li>
+</ul>
+<h2>1.2 The data pipeline, reconstructed</h2>
+<pre><code>raw audio (16 kHz mono)                          raw transcripts
+        │                                                │
+        │  S3TokenizerV2 @ 25 Hz                         │  MTLTokenizer
+        ▼                                                ▼
+speech tokens, 6561-code alphabet                grapheme ids + [lang] tag
+(40 ms per token, 2 mel frames)                  (optional [ipa] phone ids)
+        │                                                │
+        │  ve.embeds_from_wavs (256-d, mean over windows) │
+        ▼                                                │
+speaker embedding, 1 per utterance                       │
+        │                                                │
+        └──────────────► training example ◄───────────────┘
+             cond_prompt_speech_tokens = first 150 S3 tokens of the clip
+             (or of a same-speaker clip — the &quot;in-context voice prompt&quot;)
+</code></pre>
+<p>Design consequences that are <strong>[verified]</strong> by the shapes:</p>
+<ul>
+<li>The speech tokenizer is fixed and <em>offline</em>: T3 is trained on discrete ids, so
+the target is a classification problem over 6561 classes — no mel-spectrogram
+regression, no duration model, no variance adaptor.</li>
+<li>The reference prompt is exactly <code>speech_cond_prompt_len = 150</code> tokens = <strong>6 s</strong>,
+matching <code>ENC_COND_LEN = 6 * S3_SR</code> at inference. Training and inference see the
+same conditioning budget.</li>
+<li><code>emotion_adv</code> is a <em>scalar</em> projected to 1024-d by a bias-free linear layer.
+It is trained as a control knob; the shipped default 0.5 is the neutral point,
+which is why <code>finetune-chatterbox</code> must keep <code>exaggeration=0.5</code> — a fine-tune
+sampled at a different value teaches a different voice.</li>
+<li><code>max_text_tokens = 2048</code> and <code>max_speech_tokens = 4096</code> imply training clips up
+to ~2-3 minutes of text and ~160 s of speech; the learned position tables are
+sized <code>2048+2</code> and <code>4096+4</code>.</li>
+</ul>
+<h2>1.3 The T3 objective</h2>
+<p>The only published loss is <code>T3.loss</code> <strong>[verified]</strong>:</p>
+<pre><code class="language-python">hidden = LlamaModel(inputs_embeds = cat([cond(34), text_emb(L+2), speech_emb(S+2)]))
+text_latents   = hidden[:, 34       : 34+L+2]     -&gt; text_head   -&gt; CE vs text_tokens
+speech_latents = hidden[:, 34+L+2   : 34+L+2+S+2] -&gt; speech_head -&gt; CE vs speech_tokens
+loss = loss_text + loss_speech
+</code></pre>
+<p>Structurally this is a <strong>two-stream next-token model over one shared causal
+trunk</strong>, where:</p>
+<ul>
+<li>the <em>speech</em> stream is the real objective — it is what gets sampled at
+inference;</li>
+<li>the <em>text</em> stream is an auxiliary reconstruction task that keeps the
+transcript recoverable from the hidden states. Without it, a pure
+speech-token LM can drift away from the text and start babbling; with it, the
+state at speech position <code>p</code> still contains &quot;what word am I in&quot;.</li>
+</ul>
+<p><strong>[inferred]</strong> The upstream trainer almost certainly used the <strong>shifted</strong> form
+(position <code>p</code> predicts token <code>p+1</code>) and masked the prompt region out of the
+speech labels, because that is what generation actually needs and what the
+independent community kit implements. The shipped <code>T3.loss</code> is unshifted, which
+only makes sense as a helper for a caller that passes pre-shifted tensors. See
+§2.6 — this is the single most important detail to get right when fine-tuning.</p>
+<p><strong>[inferred]</strong> The text stream must have been trained with <em>text dropout</em>
+(occasionally replacing the text embeddings with zeros), because at inference
+<code>prepare_input_embeds</code> does exactly that to build the unconditional CFG branch:</p>
+<pre><code class="language-python">if cfg_weight &gt; 0.0:
+    text_emb[1].zero_()   # CFG uncond
+</code></pre>
+<p>Guidance with an un-trained zero branch would produce nonsense, and CFG
+(<code>cfg_weight=0.5</code>) is a shipped default, so a zeroed-text condition was almost
+certainly in the training distribution. The same argument applies to speaker /
+prompt dropout, which the community kit does explicitly at 20 %.</p>
+<h2>1.4 The s3gen objective</h2>
+<p><code>CausalConditionalCFM.compute_loss</code> <strong>[verified]</strong>:</p>
+<pre><code class="language-python">t  = rand();  if cosine: t = 1 - cos(t * pi / 2)
+z  = randn_like(x1)                                  # noise
+y  = (1 - (1 - sigma_min) * t) * z + t * x1          # interpolate noise -&gt; data
+u  = x1 - (1 - sigma_min) * z                        # the true velocity
+if training_cfg_rate &gt; 0:                            # 20 %
+    mu, spks, cond = mu*cfg_mask, spks*cfg_mask, cond*cfg_mask
+pred = estimator(y, mask, mu, t, spks, cond)
+loss = mse(pred * mask, u * mask) / (sum(mask) * 80)
+</code></pre>
+<p>So s3gen is <strong>flow matching with a linear (rectified-flow) path</strong> and a cosine
+<code>t</code> sampler, MSE on the velocity field, with <strong>20 % joint conditioning dropout</strong>
+(content, speaker, reference mel all dropped together). That dropout is exactly
+what makes the speaker-only CFG at inference (0.7) meaningful.</p>
+<p>The HiFT vocoder's adversarial/mel losses are <strong>not</strong> in the package
+<strong>[unknown]</strong>; the architecture (<code>[8,5,3]</code>, 3 fused ResBlocks, F0-driven harmonic
+source, <code>istft n_fft 16 / hop 4</code>) is standard HiFTNet, whose published recipe is
+LSGAN + mel L1 + feature matching with an F0 auxiliary term. Treat that as the
+prior, not as a fact about these weights.</p>
+<p><code>token_mel_ratio = 2</code> and the <code>mel_len == 2 * token_len</code> assertion in <code>embed_ref</code>
+are the contract that keeps CFM training frames aligned to token boundaries: 25
+tokens/s x 2 = 50 mel frames/s (<code>hop 480</code> at 24 kHz).</p>
+<h2>1.5 Order of training and why it matters</h2>
+<p><strong>[inferred]</strong> The dependency graph forces a staged build:</p>
+<pre><code>1. vehicle:  ve (GE2E speaker encoder)      needs only speaker labels
+2. tokens:   S3 tokenizer (VQ/FSQ over mel) needs only audio
+3. vocoder:  s3gen = CFM(tokens|text-enc, speaker, ref-mel) + HiFT(mel -&gt; wav)
+4. LM:       T3 = (text, speaker, prompt tokens) -&gt; speech tokens
+</code></pre>
+<p>T3 can only be trained after 1-3 exist, because its targets <em>are</em> S3 tokens and
+its conditioning <em>is</em> a <code>ve</code> embedding. This is also why the released weights are
+four files and why fine-tuning T3 alone is legitimate: T3 sits at the top of a
+frozen pyramid.</p>
+<p>A useful sanity check on this ordering: a T3 trained against a <em>different</em>
+tokenizer or a <em>different</em> <code>ve</code> would be silently incompatible. <code>voice-clone</code>'s
+<code>load_engine</code> explicitly counts missing/unexpected keys and refuses if more than
+10 % of the keys do not fit, precisely because swapping a mismatched T3 produces
+fluent-looking garbage.</p>
+<h2>1.6 What we do not know</h2>
+<table>
+<thead>
+<tr>
+<th>question</th>
+<th>status</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>total hours of audio</td>
+<td><strong>unknown</strong> (nothing in the repo; the 23-language scope implies thousands of hours, but any number would be invented)</td>
+</tr>
+<tr>
+<td>per-language balance</td>
+<td><strong>unknown</strong></td>
+</tr>
+<tr>
+<td>steps / batch / LR / hardware</td>
+<td><strong>unknown</strong></td>
+</tr>
+<tr>
+<td>whether transcripts came from ASR or human labels</td>
+<td><strong>unknown</strong>; the tag set (laughter, cough, music) suggests ASR + heuristics</td>
+</tr>
+<tr>
+<td>text dropout rate for CFG</td>
+<td><strong>unknown</strong>, but &gt; 0 is implied by the shipped <code>cfg_weight</code> path</td>
+</tr>
+<tr>
+<td>T3 learning-rate schedule</td>
+<td><strong>unknown</strong></td>
+</tr>
+<tr>
+<td>how aligned heads 12/13/9 were chosen</td>
+<td><strong>unknown</strong>; the code calls them <code>LLAMA_ALIGNED_HEADS</code> with no derivation</td>
+</tr>
+</tbody>
+</table>
+<h2>If you need a defensible number for any of these, the only honest approach is to
+measure it yourself with an ablation (§3.3).</h2>
+<h1>Part II — The fine-tune in this repository (<code>sheng_t3</code>)</h1>
+<h2>2.1 The decision that defines the recipe</h2>
+<pre><code>trainable:    t3   (~541 M params incl. both embedding tables)
+frozen:       ve, s3gen.tokenizer, s3gen.flow (CFM), s3gen.mel2wav (HiFT)
+data:         38 clips x ~30 s = ~19 min, one speaker (&quot;abel&quot;), Sheng
+objective:    CE(text) + CE(speech) on the frozen tokenizers
+hardware:     Colab L4 24 GB (default), A100, or T4 (fp16 only)
+wall clock:   ~1.5-3 h for 600 steps on an L4
+</code></pre>
+<p>Why T3 only: timbre, accent and code-switch prosody live in the token sequence.
+The vocoder is 200 M parameters of audio fidelity that 19 minutes of data cannot
+improve and can easily damage. Freezing it makes &quot;audio quality regression&quot;
+impossible by construction — the failure mode becomes &quot;wrong tokens&quot;, which is
+audible and measurable.</p>
+<p>Why the multilingual checkpoint: <code>sw</code> is already in <code>SUPPORTED_LANGUAGES</code>, so the
+fine-tune learns <em>Sheng delivery</em> (Swahili matrix + English content words + one
+voice), not Swahili phonology from scratch. Starting from the English checkpoint
+(<code>--model-variant english</code>) would have to learn Swahili <em>and</em> the voice from 19
+minutes, which is not a realistic ask.</p>
+<h2>2.2 Data stage</h2>
+<p><code>dataset.py</code> <strong>[verified]</strong>:</p>
+<pre><code>lyle-mlengineer/kenyan-celebs  (42 clips, speaker &quot;abel&quot;, ~30 s each, 22.05 kHz)
+  -&gt; mono, resample to 16 kHz, PCM16 WAV        data/wav16k/abel_00NN.wav
+  -&gt; shuffle(seed=1337), val = 15 % (min 1, capped by --val-clips, default 4)
+  -&gt; manifests/train.jsonl, manifests/val.jsonl  {&quot;audio&quot;,&quot;text&quot;,&quot;seconds&quot;,&quot;speaker&quot;,&quot;language&quot;}
+</code></pre>
+<p>Deliberate choices:</p>
+<ul>
+<li><strong>Clips are kept whole.</strong> Splitting a 30 s clip needs forced alignment to keep
+transcripts word-accurate; a wrong transcript hurts cloning more than a long
+clip does.</li>
+<li><strong>No text normalisation beyond whitespace.</strong> Sheng orthography is what the
+speaker actually said; &quot;correcting&quot; it teaches the model the wrong mapping.</li>
+<li><strong>16 kHz, not 24 kHz.</strong> Both consumers of the input audio (<code>ve</code>, S3 tokenizer)
+are 16 kHz; only the <em>output</em> is 24 kHz, and s3gen is untouched.</li>
+<li>A code-switch marker statistic (<code>code_switch_stats</code>) is computed as a sanity
+signal — it is a rough English/Swahili word-share, not a language ID.</li>
+</ul>
+<h2>2.3 Featurisation</h2>
+<p><code>t3data.py::Featurizer</code> builds exactly what <code>generate</code> consumes at inference:</p>
+<table>
+<thead>
+<tr>
+<th>field</th>
+<th>source</th>
+<th>shape</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>text_tokens</code></td>
+<td><code>MTLTokenizer(text, language_id=&quot;sw&quot;)</code> + <code>[START]</code>/<code>[STOP]</code></td>
+<td><code>(L+2,)</code></td>
+</tr>
+<tr>
+<td><code>speech_tokens</code></td>
+<td><code>s3gen.tokenizer(wav16k)</code> + start/stop speech ids</td>
+<td><code>(S+2,)</code></td>
+</tr>
+<tr>
+<td><code>t3_cond_speaker_emb</code></td>
+<td><code>ve.embeds_from_wavs([wav16k])</code>, reshaped to 256</td>
+<td><code>(256,)</code></td>
+</tr>
+<tr>
+<td><code>t3_cond_prompt_speech_tokens</code></td>
+<td>S3 tokens of the <strong>first 6 s</strong>, zero-padded/truncated to 150</td>
+<td><code>(150,)</code></td>
+</tr>
+<tr>
+<td><code>t3_cond_emotion_adv</code></td>
+<td><code>0.5</code></td>
+<td>scalar</td>
+</tr>
+</tbody>
+</table>
+<p>Cost control <strong>[verified]</strong>: featurisation runs a full mel + quantiser forward per
+clip and is cached as <code>.npz</code>, keyed by
+<code>sha1(audio_path | mtime | transcript | featuriser signature)</code>. Editing a
+transcript or changing <code>cond_seconds</code> invalidates the entry automatically; a
+corrupt cache entry is treated as a miss. On a Colab disconnect you therefore
+re-enter training with no featurisation cost.</p>
+<p>The important subtlety: <strong>the prompt tokens are taken from the same clip that is
+being predicted.</strong> That is teacher forcing on the conditioning: the model sees the
+first 6 s of the target and must produce the rest. At inference the prompt comes
+from a <em>different</em> recording of the same speaker. Fine-tuning long enough on
+&quot;prompt == prefix of target&quot; is one mechanism behind the well-known degradation
+where the model starts reciting training clips — prompt and target become too
+correlated.</p>
+<h2>2.4 Batching</h2>
+<p><code>SpeechCollator</code> <strong>[verified]</strong>:</p>
+<pre><code>text_tokens      (B, max_text)     pad 0
+speech_tokens    (B, max_speech)   pad 0
+text_token_lens  (B,)
+speech_token_lens(B,)
+speaker_emb      (B, 256)
+prompt_tokens    (B, 150)          fixed length, no padding
+emotion_adv      (B, 1, 1)
+</code></pre>
+<p>Two things to know:</p>
+<ul>
+<li><code>T3.loss</code> asserts <code>len_text == text_token_lens.max()</code>, so a batch is padded to
+its own maximum and the mask is built from the lens. No cross-batch waste.</li>
+<li><code>max_speech_len</code> defaults to 1024 = ~41 s at 25 Hz, so 30 s clips always fit;
+<code>max_text_len</code> 512 is far above the ~450-character transcripts.</li>
+</ul>
+<p><code>T3Dataset.__getitem__</code> returns <code>None</code> on a bad clip and records it in
+<code>self.failures</code>; the collator drops <code>None</code>s and the trainer aborts only after 50
+empty batches in a row. One corrupt WAV cannot kill a run.</p>
+<h2>2.5 Optimisation</h2>
+<p><strong>[verified]</strong> defaults (<code>train_t3.py</code>, <code>config.py::PROFILES</code>):</p>
+<table>
+<thead>
+<tr>
+<th>item</th>
+<th>value</th>
+<th>why</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>optimiser</td>
+<td><code>AdamW(betas=(0.9, 0.95), wd=0.01)</code></td>
+<td>LLM-standard; β2 below 0.999 suits short runs</td>
+</tr>
+<tr>
+<td>LR</td>
+<td><code>5e-5</code></td>
+<td>full fine-tune of a 0.5 B LM on 19 min; this model family is reported to produce noise / endless generation above ~2e-5 for long runs</td>
+</tr>
+<tr>
+<td>schedule</td>
+<td>linear warmup 50 steps, then cosine to 0</td>
+<td>a pure function of <code>step</code>, so resume is exact</td>
+</tr>
+<tr>
+<td>steps</td>
+<td>600 default; <code>voice-clone</code> recommends 200</td>
+<td>see the epochs table</td>
+</tr>
+<tr>
+<td>effective batch</td>
+<td><strong>8 = batch x grad_accum</strong> on every profile</td>
+<td>makes <code>steps</code> and <code>lr</code> mean the same on every GPU</td>
+</tr>
+<tr>
+<td>grad clip</td>
+<td>1.0</td>
+<td></td>
+</tr>
+<tr>
+<td>AMP</td>
+<td>bf16 on L4/A100, fp16 + <code>GradScaler</code> on T4, fp32 on CPU</td>
+<td>T4/Turing has no native bf16</td>
+</tr>
+<tr>
+<td>seed</td>
+<td>1337</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<p>Epoch arithmetic for 38 clips:</p>
+<pre><code>600 steps x 8 clips = 4800 clip-passes / 38 clips = ~126 epochs
+200 steps x 8 clips = 1600 clip-passes / 38 clips = ~42 epochs
+</code></pre>
+<p>126 epochs over 19 minutes is a <em>lot</em>. That is why <code>voice-clone</code> recommends 200
+steps, and why both projects treat &quot;overfitting is the main failure mode&quot; as a
+first-class note: the LR is low enough that loss keeps falling while the model
+memorises the clips.</p>
+<h2>2.6 The loss caveat (read this before you spend GPU hours)</h2>
+<p><code>train_t3.py</code> calls the module's own loss:</p>
+<pre><code class="language-python">loss_text, loss_speech = model.t3.loss(t3_cond=..., text_tokens=..., speech_tokens=...)
+</code></pre>
+<p>and <code>T3.loss</code> scores position <code>p</code> against token <code>p</code> (unshifted). Generation,
+however, samples the <em>next</em> token. The community kit
+(<code>gokhaneraslan/chatterbox-finetuning</code>, the one behind
+<code>msingiai/sauti_tts_v2</code>) instead does:</p>
+<pre><code class="language-python">speech_logits = out.speech_logits[:, :-1].transpose(1, 2)
+speech_labels = speech_tokens[:, 1:]
+# additionally mask the reference-prompt region and the padding out of the labels
+loss_speech = F.cross_entropy(speech_logits, speech_labels, ignore_index=-100)
+</code></pre>
+<p>If a run produces repetitive or runaway output after training, this is the first
+thing to check. <code>docs/03-chatterbox-finetuning.md</code> §1.4 has a drop-in patched
+<code>batch_loss</code> that implements the shifted objective inside this repo, without
+switching trainer.</p>
+<h2>2.7 Checkpointing, resume, and the Colab reality</h2>
+<p><strong>[verified]</strong></p>
+<pre><code>checkpoints/&lt;run&gt;/step_0000100/
+    t3_cfg.safetensors      fp16 state_dict, same keys as the base file (~1 GB)
+    training_state.json     step, losses, argv, timestamps, base file name
+    run_config.json         resolved arguments
+checkpoints/&lt;run&gt;/latest/   copy of the newest step; what --resume auto loads
+</code></pre>
+<ul>
+<li>fp16 checkpoints (<code>_to_fp16_state</code>) keep a run inside a free Drive quota;</li>
+<li><strong>no optimiser state is saved</strong> — resume restarts AdamW and the LR schedule from
+the saved step. Deliberate trade: ~1 GB per save instead of ~3 GB;</li>
+<li><code>keep_last=3</code> rotates old step dirs (<code>_rotate</code>);</li>
+<li>SIGINT/SIGTERM sets a flag and the loop checkpoints <em>after</em> the current step, so
+a <code>--max-hours</code> guard (which raises SIGINT just before the session limit) costs
+at most one step;</li>
+<li>50 consecutive empty batches raises <code>SystemExit</code> instead of silently looping.</li>
+</ul>
+<h2>2.8 Evaluation and export</h2>
+<p><code>eval</code> generates the same 5 Sheng prompts from the base model and the checkpoint
+(<code>--ab</code>), records duration, wall time and RTF, and writes <code>eval.json</code> + <code>eval.md</code>.
+It uses a held-out clip as the voice prompt (<code>reference_clip</code> prefers the val
+manifest). The judgement is human: intelligible <em>new</em> Sheng text and a
+recognisable voice; &quot;sounds right only on training sentences&quot; = overfitting, so
+take an earlier checkpoint.</p>
+<p><code>export</code> copies <code>ve.pt</code>, <code>s3gen.pt</code>, <code>grapheme_mtl_merged_expanded_v1.json</code>,
+<code>conds.pt</code> and drops the fine-tuned <code>t3_cfg.safetensors</code> beside them, plus a
+README, a load snippet and the eval WAVs. The base
+<code>t3_mtl23ls_v2.safetensors</code> is deliberately <strong>not</strong> copied.</p>
+<h2>2.9 Failure modes and their signatures</h2>
+<table>
+<thead>
+<tr>
+<th>symptom</th>
+<th>likely cause</th>
+<th>action</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>loss falls, audio recites training text</td>
+<td>overfit (prompt == target prefix)</td>
+<td>fewer steps, earlier checkpoint</td>
+</tr>
+<tr>
+<td>loss falls, audio is babble / never stops</td>
+<td>LR too high, or the unshifted-loss issue</td>
+<td><code>--lr 2e-5</code>, §2.6</td>
+</tr>
+<tr>
+<td>loss flat at ~log(6561) = 8.79</td>
+<td>labels/tokens broken (all padding)</td>
+<td>check the featuriser cache</td>
+</tr>
+<tr>
+<td>val loss rises while train falls</td>
+<td>overfit, expected</td>
+<td>keep <code>valid_interval=100</code></td>
+</tr>
+<tr>
+<td>OOM on T4</td>
+<td>bf16 profile on Turing</td>
+<td><code>--profile t4</code> (fp16), batch*accum = 8</td>
+</tr>
+<tr>
+<td>audio quality drops (noise, clicks)</td>
+<td>something unfroze s3gen</td>
+<td>must never happen: assert <code>requires_grad=False</code></td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h1>Part III — Reproducing and extending</h1>
+<h2>3.1 Minimal commands (Colab)</h2>
+<pre><code class="language-bash">pip install -e ./finetune-chatterbox
+sheng-chatterbox env &amp;&amp; sheng-chatterbox data &amp;&amp; sheng-chatterbox model
+sheng-chatterbox train --profile l4 --steps 600 --max-hours 8
+sheng-chatterbox eval --ab &amp;&amp; sheng-chatterbox export
+</code></pre>
+<h2>3.2 Changing the target language</h2>
+<ol>
+<li>Confirm the language tag exists in the tokenizer (2454-id vocab, 23 tags).
+Swahili is <code>[sw]</code> = 730. If the language is missing you need a vocabulary
+extension plus an embedding resize — see <code>docs/03</code> §3.3.</li>
+<li>Set <code>language_id</code> in the config; it propagates to the featuriser and to
+<code>generate(language_id=...)</code>.</li>
+<li>Keep the multilingual variant: the English checkpoint has a 704-id vocab and
+no <code>[xx]</code> tags at all.</li>
+</ol>
+<h2>3.3 What to measure if you must know an unknown</h2>
+<table>
+<thead>
+<tr>
+<th>unknown</th>
+<th>experiment</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>optimal steps</td>
+<td>save every 100, score each with CER + speaker cosine (<code>voice-clone eval --ckpt</code>)</td>
+</tr>
+<tr>
+<td>text-dropout need</td>
+<td>100 steps with/without <code>text_emb</code> dropout, compare CFG on/off</td>
+</tr>
+<tr>
+<td>shifted vs unshifted loss</td>
+<td>100 steps each, compare the <code>runaway</code> rate at <code>cfg_weight=0.5</code></td>
+</tr>
+<tr>
+<td>reference-prompt masking</td>
+<td>same, but listen for recitation of the prompt text</td>
+</tr>
+</tbody>
+</table>
+<p>Each is a ~20 minute L4 run; none needs the full 600-step budget to show a
+direction.</p>
+</body></html>
