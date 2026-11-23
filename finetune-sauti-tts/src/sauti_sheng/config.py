@@ -17,6 +17,7 @@ is slow, not fragile - no opt-in flag is needed anymore.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from pathlib import Path
 
 
 @dataclass(frozen=True)
@@ -206,9 +207,7 @@ def render_config(profile: Profile, run: str, paths, **overrides) -> str:
     return "\n".join(lines) + "\n"
 
 
-def write_config(paths, profile: Profile, run: str, **overrides) -> "Path":
-    from pathlib import Path
-
+def write_config(paths, profile: Profile, run: str, **overrides) -> Path:
     paths.config_dir.mkdir(parents=True, exist_ok=True)
     path = Path(paths.config_path(run))
     path.write_text(render_config(profile, run, paths, **overrides), encoding="utf-8", newline="\n")

@@ -144,8 +144,10 @@ def _write_report(paths: Paths, raw: Path, raw_bytes: int, info: dict, vocab_siz
         "",
         "## What was kept",
         "",
-        f"`{paths.rel(paths.sauti_ema_ckpt)}` contains exactly one key,"
-        f" `{EMA_KEY}`, with the ``ema_model.`` prefix intact (F5 strips it).",
+        (
+            f"`{paths.rel(paths.sauti_ema_ckpt)}` contains exactly one key,"
+            f" `{EMA_KEY}`, with the ``ema_model.`` prefix intact (F5 strips it)."
+        ),
         f"Size: **{ema_gb:.2f} GB**.",
         "",
         "## What was dropped, and why",
@@ -157,27 +159,35 @@ def _write_report(paths: Paths, raw: Path, raw_bytes: int, info: dict, vocab_siz
         f"| `update` ({info['update']}) | its presence makes F5 treat the file as a **resume**, not a pretrained init |",
         "| `model_state_dict` | the online weights of a finished run; EMA is the better init |",
         "",
-        "> F5 chooses the branch by checkpoint keys, not by filename. A file named"
-        " `pretrained_*.pt` that still contains `update` is still resumed. That is"
-        " why the strip is done here instead of a rename.",
+        (
+            "> F5 chooses the branch by checkpoint keys, not by filename. A file named"
+            " `pretrained_*.pt` that still contains `update` is still resumed. That is"
+            " why the strip is done here instead of a rename."
+        ),
         "",
         "## Vocab check",
         "",
-        "Sauti's `vocab.txt` has one entry per line, index 0 = space (F5's"
-        " unknown-character fallback). F5's `TextEmbedding` allocates"
-        " `nn.Embedding(text_num_embeds + 1, text_dim)` for its filler token, so"
-        " `transformer.text_embed.text_embed.weight` has"
-        f" **{vocab_size} + 1 = {info['text_embed_rows']} rows** - one more than the"
-        " vocab file has lines, and no character is remapped. Training must reuse"
-        " **Sauti's** vocab: F5's Emilia vocab would silently remap every character.",
+        (
+            "Sauti's `vocab.txt` has one entry per line, index 0 = space (F5's"
+            " unknown-character fallback). F5's `TextEmbedding` allocates"
+            " `nn.Embedding(text_num_embeds + 1, text_dim)` for its filler token, so"
+            " `transformer.text_embed.text_embed.weight` has"
+        ),
+        (
+            f" **{vocab_size} + 1 = {info['text_embed_rows']} rows** - one more than the"
+            " vocab file has lines, and no character is remapped. Training must reuse"
+            " **Sauti's** vocab: F5's Emilia vocab would silently remap every character."
+        ),
         "",
     ]
     if deleted:
         lines += [
             "## Cleanup",
             "",
-            f"The {raw_bytes / 1024**3:.2f} GB raw download was deleted from scratch;"
-            " only the EMA file is kept.",
+            (
+                f"The {raw_bytes / 1024**3:.2f} GB raw download was deleted from scratch;"
+                " only the EMA file is kept."
+            ),
             "",
         ]
     paths.model_report.write_text("\n".join(lines), encoding="utf-8")
@@ -297,8 +307,6 @@ def load_for_inference(
     Defaults to the EMA weights, i.e. the untouched Sauti release, when no
     checkpoint is given. Pass a fine-tuned checkpoint with ``use_ema=False``.
     """
-    import torch
-
     vocab = Path(vocab or paths.sauti_vocab)
     checkpoint = Path(checkpoint or paths.sauti_ema_ckpt)
     if not checkpoint.is_file():

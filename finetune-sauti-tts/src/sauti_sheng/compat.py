@@ -86,7 +86,6 @@ def _sf_save(filepath, src, sample_rate: int, **_kwargs):
     if array.ndim == 2:
         array = array.T  # (channels, frames) -> (frames, channels)
     sf.write(str(filepath), array, int(sample_rate))
-    return None
 
 
 def _sf_info(filepath, **_kwargs) -> AudioInfo:

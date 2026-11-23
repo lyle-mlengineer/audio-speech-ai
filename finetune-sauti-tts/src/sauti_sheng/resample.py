@@ -48,7 +48,7 @@ def resample_numpy(x: np.ndarray, sr_in: int, sr_out: int) -> np.ndarray:
 
     cutoff = min(1.0, sr_out / sr_in)
     phases = _polyphase_matrix(up, down, cutoff)
-    n_out = int(math.floor(x.size * up / down))
+    n_out = math.floor(x.size * up / down)
     if n_out <= 0:
         return np.zeros(0, dtype=np.float32)
 

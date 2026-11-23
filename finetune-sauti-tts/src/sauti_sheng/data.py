@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import csv
 import json
-import math
 import random
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,7 +35,6 @@ from .text import (
     charset_report,
     choose_ref_prefix,
     clean_text,
-    estimate_fraction,
     f5_text_identity,
     read_vocab,
 )
@@ -50,18 +48,22 @@ MAX_TRAIN_SECONDS = 29.98
 def download_parquet(paths: Paths, force: bool = False) -> Path:
     if paths.raw_parquet.is_file() and not force:
         return paths.raw_parquet
+    import shutil
+
     from huggingface_hub import hf_hub_download
 
     paths.data_dir.mkdir(parents=True, exist_ok=True)
-    local = hf_hub_download(
-        repo_id=DATASET_ID,
-        repo_type="dataset",
-        filename=DATASET_PARQUET,
-        local_dir=str(paths.raw_parquet.parent),
+    # No ``local_dir``: let the Hub use its own cache, then copy the one file we
+    # need. With ``local_dir`` the filename's ``data/`` prefix creates a nested
+    # ``data/data/`` copy inside the artifacts root (Drive space is not free).
+    cached = Path(
+        hf_hub_download(
+            repo_id=DATASET_ID,
+            repo_type="dataset",
+            filename=DATASET_PARQUET,
+        )
     )
-    local = Path(local)
-    if local.resolve() != paths.raw_parquet.resolve():
-        paths.raw_parquet.write_bytes(local.read_bytes())
+    shutil.copy2(cached, paths.raw_parquet)
     return paths.raw_parquet
 
 
@@ -74,18 +76,13 @@ def ensure_vocab(paths: Paths, force: bool = False) -> Path:
     (F5 pads the embedding with a filler row), so 2545 entries -> 2546 rows.
     """
     if force or not paths.sauti_vocab.is_file():
+        import shutil
+
         from huggingface_hub import hf_hub_download
 
         paths.pretrained_dir.mkdir(parents=True, exist_ok=True)
-        downloaded = Path(
-            hf_hub_download(
-                repo_id=MODEL_REPO_ID,
-                filename=VOCAB_FILE,
-                local_dir=str(paths.pretrained_dir),
-            )
-        )
-        if downloaded.resolve() != paths.sauti_vocab.resolve():
-            paths.sauti_vocab.write_bytes(downloaded.read_bytes())
+        cached = Path(hf_hub_download(repo_id=MODEL_REPO_ID, filename=VOCAB_FILE))
+        shutil.copy2(cached, paths.sauti_vocab)
 
     paths.f5_dataset_dir.mkdir(parents=True, exist_ok=True)
     if force or not paths.f5_vocab.is_file():
@@ -316,8 +313,10 @@ def _write_report(
         f"- missing from vocab: **{len(charset.missing)}**"
         + (f" -> `{charset.missing}`" if charset.missing else ""),
         f"- non-ASCII: {len(charset.non_ascii)}",
-        f"- digits: {charset.digits} (left as-is; F5 pronounces digits poorly, but"
-        " rewriting them would break the transcript/audio pair)",
+        (
+            f"- digits: {charset.digits} (left as-is; F5 pronounces digits poorly, but"
+            " rewriting them would break the transcript/audio pair)"
+        ),
         f"- apostrophes: {charset.apostrophes} (kept: `ng'ang'ana` is not `ngangana`)",
         f"- F5 `convert_char_to_pinyin`: {stats.get('pinyin_identity', 'unknown')}",
         "",
@@ -328,9 +327,11 @@ def _write_report(
         f"- transcript estimated from {ref.text_fraction * 100:.1f}% of the clip's characters",
         f"- ref text: `{ref.text}`",
         "",
-        "> The reference transcript is an estimate, not a forced alignment. Play"
-        " `ref_audio.wav` and read `ref_text.txt` before trusting the eval: a"
-        " wrong ref text mainly costs timbre fidelity, not intelligibility.",
+        (
+            "> The reference transcript is an estimate, not a forced alignment. Play"
+            " `ref_audio.wav` and read `ref_text.txt` before trusting the eval: a"
+            " wrong ref text mainly costs timbre fidelity, not intelligibility."
+        ),
         "",
     ]
     if warnings:
@@ -466,7 +467,7 @@ def prepare(
         "n_train": len(train_rows),
         "n_val": n_val_total,
         "total_seconds": float(sum(durations)),
-        "source_sample_rate": sorted(source_rates)[0] if len(source_rates) == 1 else sorted(source_rates),
+        "source_sample_rate": min(source_rates) if len(source_rates) == 1 else sorted(source_rates),
         "sample_rate": SAMPLE_RATE,
         "chars_per_second": float(sum(len(t) for t in texts) / max(sum(durations), 1e-9)),
         "pinyin_identity": (

@@ -83,7 +83,6 @@ def choose_ref_prefix(text: str, target_fraction: float) -> PrefixChoice:
         return PrefixChoice(clean_text(text), 1.0, 1, 1)
 
     total = max(1, len(clean_text(text)))
-    target_chars = target_fraction * total
     best: tuple[float, int, str] | None = None
     for i in range(1, len(sentences)):
         prefix = join_sentences(sentences[:i])

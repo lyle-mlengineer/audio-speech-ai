@@ -8,9 +8,9 @@ from sauti_sheng.config import (
     auto_profile,
     render_config,
     resolve_profile,
+    total_updates,
     updates_for,
     updates_per_epoch,
-    total_updates,
     write_config,
 )
 from sauti_sheng.paths import Paths
