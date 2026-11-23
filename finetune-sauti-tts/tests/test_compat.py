@@ -10,7 +10,6 @@ torch = pytest.importorskip("torch")
 
 def test_patch_is_idempotent_and_loads_a_wav(tmp_path):
     import soundfile as sf
-
     import torchaudio
 
     path = tmp_path / "a.wav"

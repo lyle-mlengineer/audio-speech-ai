@@ -237,7 +237,7 @@ class Paths:
         return self.progress_dir / "progress.md"
 
     # ---- helpers --------------------------------------------------------
-    def ensure(self) -> "Paths":
+    def ensure(self) -> Paths:
         for p in (
             self.data_dir,
             self.wav_dir,

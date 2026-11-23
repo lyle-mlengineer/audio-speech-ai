@@ -96,7 +96,7 @@ def _generate_set(
     max_seconds: float,
 ) -> list[dict]:
     ref_audio, ref_rate, ref_text = load_reference(paths)
-    model, vocab_size = load_for_inference(paths, checkpoint, use_ema=use_ema, device=device)
+    model, _ = load_for_inference(paths, checkpoint, use_ema=use_ema, device=device)
 
     from .infer import load_vocoder
 
@@ -174,9 +174,11 @@ def _write_report(dest: Path, checkpoint: Path, use_ema: bool, vocab_size: int |
             )
         lines += [
             "",
-            "Listen to the `base_*` and `ft_*` pairs. A good fine-tune keeps the"
-            "timbre and improves the Sheng delivery; a bad one is quieter, noisier,"
-            "or forgets to stop.",
+            (
+                "Listen to the `base_*` and `ft_*` pairs. A good fine-tune keeps the"
+                "timbre and improves the Sheng delivery; a bad one is quieter, noisier,"
+                "or forgets to stop."
+            ),
         ]
     lines += [
         "",

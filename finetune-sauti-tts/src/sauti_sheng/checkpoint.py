@@ -61,9 +61,7 @@ STALE_KEYS = (
 def _unprefix(state: dict) -> dict:
     out = {}
     for key, value in state.items():
-        name = str(key)
-        if name.startswith("ema_model."):
-            name = name[len("ema_model."):]
+        name = str(key).removeprefix("ema_model.")
         if name in {"initted", "step", "update"}:
             continue
         out[name] = value
